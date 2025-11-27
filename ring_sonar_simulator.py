@@ -118,6 +118,18 @@ class RingSonarCore:
         # 传感器读数 (每个传感器的距离测量)
         self.sonar_readings = np.full(self.num_sensors, self.sensor_max_range, dtype=np.float32)
         
+        # 传感器触发策略配置
+        self.trigger_mode = "alternating"  # baseline: 交替扫描
+        self.trigger_cycle_index = 0  # 当前扫描组索引
+        
+        # 交替扫描分组 (奇偶分组，避免相邻传感器同时触发)
+        # 组1: 偶数ID [0,2,4,6,8,10]
+        # 组2: 奇数ID [1,3,5,7,9,11]
+        self.alternating_groups = [
+            [i for i in range(self.num_sensors) if i % 2 == 0],  # 偶数组
+            [i for i in range(self.num_sensors) if i % 2 == 1]   # 奇数组
+        ]
+        
         # 障碍物
         self.obstacles = []
         self._have_map = False
@@ -240,8 +252,41 @@ class RingSonarCore:
             'step_counter': int(self.step_counter),
             'collision_occurred': bool(self._collision_occurred),
             'stuck_counter': int(self._stuck_counter),
-            'sim_time': float(self.sim_time)
+            'sim_time': float(self.sim_time),
+            'trigger_mode': self.trigger_mode,
+            'active_group': self.trigger_cycle_index
         }
+    
+    def set_trigger_mode(self, mode: str, groups: Optional[List[List[int]]] = None):
+        """
+        设置传感器触发模式
+        
+        参数:
+            mode: "alternating" 或 "simultaneous"
+            groups: 自定义分组（仅用于alternating模式）
+                   例如: [[0,3,6,9], [1,4,7,10], [2,5,8,11]] 三组交替
+        """
+        self.trigger_mode = mode
+        self.trigger_cycle_index = 0
+        
+        if mode == "alternating" and groups is not None:
+            self.alternating_groups = groups
+            print(f"触发模式: 交替扫描 ({len(groups)}组)")
+            for i, group in enumerate(groups):
+                print(f"  组{i}: 传感器 {group}")
+        elif mode == "alternating":
+            print(f"触发模式: 交替扫描 (2组: 奇偶交替)")
+            print(f"  组0: 传感器 {self.alternating_groups[0]}")
+            print(f"  组1: 传感器 {self.alternating_groups[1]}")
+        elif mode == "simultaneous":
+            print("触发模式: 同时扫描所有传感器")
+    
+    def get_active_sensors(self) -> List[int]:
+        """获取当前激活的传感器ID列表"""
+        if self.trigger_mode == "alternating":
+            return self.alternating_groups[self.trigger_cycle_index]
+        else:
+            return list(range(self.num_sensors))
     
     def fisher_map_stats(self) -> Dict[str, float]:
         """Fisher地图统计信息"""
@@ -357,10 +402,31 @@ class RingSonarCore:
     # -------- 传感器扫描 -------- #
     
     def _scan_all_sensors(self):
-        """扫描所有传感器"""
-        for sensor in self.sensors:
-            distance = self._scan_single_sensor(sensor)
-            self.sonar_readings[sensor.id] = distance
+        """根据触发策略扫描传感器"""
+        if self.trigger_mode == "alternating":
+            # 交替扫描：每次只扫描当前组的传感器
+            current_group = self.alternating_groups[self.trigger_cycle_index]
+            sensors_to_scan = [self.sensors[i] for i in current_group]
+            
+            # 扫描当前组
+            for sensor in sensors_to_scan:
+                distance = self._scan_single_sensor(sensor)
+                self.sonar_readings[sensor.id] = distance
+            
+            # 切换到下一组
+            self.trigger_cycle_index = (self.trigger_cycle_index + 1) % len(self.alternating_groups)
+            
+        elif self.trigger_mode == "simultaneous":
+            # 同时扫描所有传感器（原始行为，用于对比）
+            for sensor in self.sensors:
+                distance = self._scan_single_sensor(sensor)
+                self.sonar_readings[sensor.id] = distance
+        
+        else:
+            # 默认：同时扫描
+            for sensor in self.sensors:
+                distance = self._scan_single_sensor(sensor)
+                self.sonar_readings[sensor.id] = distance
     
     def _scan_single_sensor(self, sensor: SonarSensor) -> float:
         """扫描单个传感器，返回最近障碍物距离"""
