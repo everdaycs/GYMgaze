@@ -21,6 +21,9 @@ Thumbs.db
 
 # 项目特定
 fisher_analysis_plots/
+diffusion_training_data/
+checkpoint_*.pth
+training_logs/
 *.png
 !ring_sonar_layout.png
 !ring_sonar_observations.png
