@@ -19,9 +19,10 @@ from typing import List, Tuple, Dict, Any, Optional
 from dataclasses import dataclass
 
 from fisher_utils import (
-    FisherCalculator, clamp, angnorm_deg, angdiff_deg,
+    clamp, angnorm_deg, angdiff_deg,
     add_global_feature
 )
+from sonar_fisher_calculator import SonarFisherCalculator
 
 
 # ------------------------------- 传感器定义 -------------------------------- #
@@ -75,7 +76,9 @@ class RingSonarCore:
                  sensor_max_range: float = 12.5,
                  feature_map_size: int = 100,
                  feature_map_resolution: float = 0.25,
-                 control_frequency: float = 5.0):
+                 control_frequency: float = 5.0,
+                 trigger_mode: str = "sector",  # 触发模式
+                 dt: float = 0.1):  # 新增：仿真时间步长（秒）
         
         # 世界参数
         self.world_width = float(world_width)
@@ -89,6 +92,10 @@ class RingSonarCore:
         self.sensor_fov = float(sensor_fov)
         self.sensor_max_range = float(sensor_max_range)
         
+        # 触发模式配置
+        self.trigger_mode = trigger_mode
+        self._init_trigger_config()
+        
         # 初始化传感器阵列
         self.sensors: List[SonarSensor] = []
         self._init_sensors()
@@ -101,15 +108,13 @@ class RingSonarCore:
         self.global_feature_map = np.zeros((self.global_feature_map_size, self.global_feature_map_size), dtype=np.float32)
         
         # 时间与控制
-        self.dt = 0.1
+        self.dt = float(dt)  # 仿真时间步长（可配置）
         self.sim_time = 0.0
-        self.control_frequency = float(control_frequency)
-        self.control_period = 1.0 / self.control_frequency if self.control_frequency > 0 else 0.0
-        self.last_control_update = 0.0
         
         # 机器人状态
         self.robot_pos = np.array([self.world_width / 2, self.world_height / 2], dtype=np.float64)
         self.robot_angle = 0.0           # deg, 机器人朝向
+        self._robot_angle_rad_cache = 0.0  # 缓存弧度值，避免重复转换
         self.velocity = 0.0              # m/s
         self.angular_velocity = 0.0      # rad/s
         self.max_linear_velocity = 3.0
@@ -118,17 +123,8 @@ class RingSonarCore:
         # 传感器读数 (每个传感器的距离测量)
         self.sonar_readings = np.full(self.num_sensors, self.sensor_max_range, dtype=np.float32)
         
-        # 传感器触发策略配置
-        self.trigger_mode = "alternating"  # baseline: 交替扫描
-        self.trigger_cycle_index = 0  # 当前扫描组索引
-        
-        # 交替扫描分组 (奇偶分组，避免相邻传感器同时触发)
-        # 组1: 偶数ID [0,2,4,6,8,10]
-        # 组2: 奇数ID [1,3,5,7,9,11]
-        self.alternating_groups = [
-            [i for i in range(self.num_sensors) if i % 2 == 0],  # 偶数组
-            [i for i in range(self.num_sensors) if i % 2 == 1]   # 奇数组
-        ]
+        # 跟踪本帧哪些传感器被扫描过（用于occupancy grid更新）
+        self.active_sensors_this_frame = set()
         
         # 障碍物
         self.obstacles = []
@@ -143,8 +139,56 @@ class RingSonarCore:
         self.width = int(self.world_width * self.pixel_per_meter)
         self.height = int(self.world_height * self.pixel_per_meter)
         
-        # Fisher计算器
-        self.fisher_calc = FisherCalculator(distance_scale=50.0)
+        # Fisher计算器（超声波雷达专用）
+        self.fisher_calc = SonarFisherCalculator(
+            num_sensors=self.num_sensors,
+            sensor_spacing=360.0 / self.num_sensors,
+            sensor_fov=self.sensor_fov,
+            max_range=self.sensor_max_range
+        )
+    
+    # -------- 触发模式配置 -------- #
+    
+    def _init_trigger_config(self):
+        """初始化触发配置"""
+        if self.trigger_mode == "sector":
+            # 扇区轮询模式：分4个扇区，每个扇区3个传感器
+            # 传感器ID: 0(0°), 1(30°), 2(60°), 3(90°), ..., 11(330°)
+            self.sectors = {
+                "front": [11, 0, 1],      # 330°, 0°, 30° (机器人前方±30°)
+                "right": [2, 3, 4],       # 60°, 90°, 120° (右侧)
+                "back": [5, 6, 7],        # 150°, 180°, 210° (后方)
+                "left": [8, 9, 10]        # 240°, 270°, 300° (左侧)
+            }
+            self.sector_sequence = ["front", "right", "back", "left"]
+            self.current_sector_index = 0
+            
+            print(f"触发模式: {self.trigger_mode}")
+            print(f"扇区配置: {self.sectors}")
+            print(f"轮询顺序: {self.sector_sequence}")
+            
+        elif self.trigger_mode == "sequential":
+            # 顺序扫描模式：每次只触发1个传感器，完全避免干扰
+            self.current_sensor_index = 0
+            print(f"触发模式: {self.trigger_mode} (顺序扫描，完全避免干扰)")
+            print(f"扫描顺序: 0 → 1 → 2 → ... → 11 → 0")
+            
+        elif self.trigger_mode == "interleaved":
+            # 交错扫描模式：传感器间隔足够大，避免干扰
+            # 奇数轮次：0, 2, 4, 6, 8, 10 (间隔60°)
+            # 偶数轮次：1, 3, 5, 7, 9, 11 (间隔60°)
+            self.interleaved_groups = [
+                [0, 2, 4, 6, 8, 10],  # 偶数ID，间隔60°
+                [1, 3, 5, 7, 9, 11]   # 奇数ID，间隔60°
+            ]
+            self.current_group_index = 0
+            self.current_sensor_in_group = 0
+            print(f"触发模式: {self.trigger_mode} (交错扫描)")
+            print(f"组1: {self.interleaved_groups[0]} (间隔60°)")
+            print(f"组2: {self.interleaved_groups[1]} (间隔60°)")
+        else:
+            # all 或其他模式
+            print(f"触发模式: {self.trigger_mode}")
     
     # -------- 传感器初始化 -------- #
     
@@ -187,12 +231,12 @@ class RingSonarCore:
         
         self.robot_pos = self._find_safe_start()
         self.robot_angle = float(random.randint(0, 360))
+        self._robot_angle_rad_cache = math.radians(self.robot_angle)
         
         self.velocity = 0.0
         self.angular_velocity = 0.0
         
         self.sim_time = 0.0
-        self.last_control_update = 0.0
         
         self.feature_map.fill(0.0)
         self.global_feature_map.fill(0.0)
@@ -214,10 +258,6 @@ class RingSonarCore:
         
         # 更新时间
         self.sim_time += self.dt
-        
-        # 控制更新节奏
-        if self.control_period > 0 and (self.sim_time - self.last_control_update) >= self.control_period:
-            self.last_control_update = self.sim_time
         
         # 更新位姿
         self._update_robot()
@@ -252,41 +292,8 @@ class RingSonarCore:
             'step_counter': int(self.step_counter),
             'collision_occurred': bool(self._collision_occurred),
             'stuck_counter': int(self._stuck_counter),
-            'sim_time': float(self.sim_time),
-            'trigger_mode': self.trigger_mode,
-            'active_group': self.trigger_cycle_index
+            'sim_time': float(self.sim_time)
         }
-    
-    def set_trigger_mode(self, mode: str, groups: Optional[List[List[int]]] = None):
-        """
-        设置传感器触发模式
-        
-        参数:
-            mode: "alternating" 或 "simultaneous"
-            groups: 自定义分组（仅用于alternating模式）
-                   例如: [[0,3,6,9], [1,4,7,10], [2,5,8,11]] 三组交替
-        """
-        self.trigger_mode = mode
-        self.trigger_cycle_index = 0
-        
-        if mode == "alternating" and groups is not None:
-            self.alternating_groups = groups
-            print(f"触发模式: 交替扫描 ({len(groups)}组)")
-            for i, group in enumerate(groups):
-                print(f"  组{i}: 传感器 {group}")
-        elif mode == "alternating":
-            print(f"触发模式: 交替扫描 (2组: 奇偶交替)")
-            print(f"  组0: 传感器 {self.alternating_groups[0]}")
-            print(f"  组1: 传感器 {self.alternating_groups[1]}")
-        elif mode == "simultaneous":
-            print("触发模式: 同时扫描所有传感器")
-    
-    def get_active_sensors(self) -> List[int]:
-        """获取当前激活的传感器ID列表"""
-        if self.trigger_mode == "alternating":
-            return self.alternating_groups[self.trigger_cycle_index]
-        else:
-            return list(range(self.num_sensors))
     
     def fisher_map_stats(self) -> Dict[str, float]:
         """Fisher地图统计信息"""
@@ -373,21 +380,22 @@ class RingSonarCore:
     
     def _update_robot(self):
         """更新机器人位姿"""
-        # 更新角度
-        new_angle = (self.robot_angle + math.degrees(self.angular_velocity * self.dt)) % 360.0
+        # 使用缓存的弧度值计算位置增量
+        delta_x = math.cos(self._robot_angle_rad_cache) * self.velocity * self.dt
+        delta_y = math.sin(self._robot_angle_rad_cache) * self.velocity * self.dt
         
         # 更新位置
         new_pos = self.robot_pos.copy()
-        new_pos[0] += math.cos(math.radians(self.robot_angle)) * self.velocity * self.dt
-        new_pos[1] += math.sin(math.radians(self.robot_angle)) * self.velocity * self.dt
-        new_pos[0] = clamp(new_pos[0], self.robot_size, self.world_width - self.robot_size)
-        new_pos[1] = clamp(new_pos[1], self.robot_size, self.world_height - self.robot_size)
+        new_pos[0] = clamp(new_pos[0] + delta_x, self.robot_size, self.world_width - self.robot_size)
+        new_pos[1] = clamp(new_pos[1] + delta_y, self.robot_size, self.world_height - self.robot_size)
         
         if self._collide_at(new_pos):
             self._handle_collision()
         else:
             self.robot_pos = new_pos
-            self.robot_angle = new_angle
+            # 更新角度和缓存
+            self.robot_angle = (self.robot_angle + math.degrees(self.angular_velocity * self.dt)) % 360.0
+            self._robot_angle_rad_cache = math.radians(self.robot_angle)
     
     def _handle_collision(self):
         """处理碰撞"""
@@ -401,32 +409,44 @@ class RingSonarCore:
     
     # -------- 传感器扫描 -------- #
     
+    def _get_active_sensor_ids(self) -> List[int]:
+        """获取当前帧应激活的传感器ID列表"""
+        if self.trigger_mode == "sector":
+            current_sector_name = self.sector_sequence[self.current_sector_index]
+            return self.sectors[current_sector_name]
+        elif self.trigger_mode == "sequential":
+            return [self.current_sensor_index]
+        elif self.trigger_mode == "interleaved":
+            current_group = self.interleaved_groups[self.current_group_index]
+            return [current_group[self.current_sensor_in_group]]
+        else:  # "all"
+            return list(range(self.num_sensors))
+    
     def _scan_all_sensors(self):
-        """根据触发策略扫描传感器"""
-        if self.trigger_mode == "alternating":
-            # 交替扫描：每次只扫描当前组的传感器
-            current_group = self.alternating_groups[self.trigger_cycle_index]
-            sensors_to_scan = [self.sensors[i] for i in current_group]
-            
-            # 扫描当前组
-            for sensor in sensors_to_scan:
-                distance = self._scan_single_sensor(sensor)
-                self.sonar_readings[sensor.id] = distance
-            
-            # 切换到下一组
-            self.trigger_cycle_index = (self.trigger_cycle_index + 1) % len(self.alternating_groups)
-            
-        elif self.trigger_mode == "simultaneous":
-            # 同时扫描所有传感器（原始行为，用于对比）
-            for sensor in self.sensors:
-                distance = self._scan_single_sensor(sensor)
-                self.sonar_readings[sensor.id] = distance
+        """扫描传感器（根据触发模式）"""
+        # 清空本帧活跃传感器记录
+        self.active_sensors_this_frame.clear()
         
-        else:
-            # 默认：同时扫描
-            for sensor in self.sensors:
-                distance = self._scan_single_sensor(sensor)
-                self.sonar_readings[sensor.id] = distance
+        # 获取需要激活的传感器ID
+        active_ids = self._get_active_sensor_ids()
+        
+        # 扫描激活的传感器
+        for sensor_id in active_ids:
+            sensor = self.sensors[sensor_id]
+            distance = self._scan_single_sensor(sensor)
+            self.sonar_readings[sensor_id] = distance
+            self.active_sensors_this_frame.add(sensor_id)
+        
+        # 更新触发模式的索引
+        if self.trigger_mode == "sector":
+            self.current_sector_index = (self.current_sector_index + 1) % len(self.sector_sequence)
+        elif self.trigger_mode == "sequential":
+            self.current_sensor_index = (self.current_sensor_index + 1) % self.num_sensors
+        elif self.trigger_mode == "interleaved":
+            self.current_sensor_in_group += 1
+            if self.current_sensor_in_group >= len(self.interleaved_groups[self.current_group_index]):
+                self.current_sensor_in_group = 0
+                self.current_group_index = (self.current_group_index + 1) % len(self.interleaved_groups)
     
     def _scan_single_sensor(self, sensor: SonarSensor) -> float:
         """扫描单个传感器，返回最近障碍物距离"""
@@ -495,14 +515,21 @@ class RingSonarCore:
                 self._add_global_feature(wx, wy, fisher)
     
     def _fisher_at(self, wx: float, wy: float, distance: float, angle_deg: float) -> float:
-        """计算特定位置的Fisher信息值"""
-        # 使用统一的Fisher计算器
-        # 这里我们使用机器人朝向作为"视线"方向的参考
+        """
+        计算特定位置的Fisher信息值
+        
+        超声波雷达版本：
+        - 考虑距离因子（近距离更可靠）
+        - 考虑传感器覆盖度（重叠区域更可信）
+        - 不考虑FOV质量（超声波只有距离信息）
+        """
+        # 计算相对机器人的角度（归一化到0-360）
+        relative_angle = (angle_deg - self.robot_angle) % 360.0
+        
+        # 使用超声波专用Fisher计算器
         return self.fisher_calc.compute(
             distance=distance,
-            angle_deg=angle_deg,
-            gaze_angle_deg=self.robot_angle,  # 使用机器人朝向
-            fov_angle_deg=self.sensor_fov
+            angle_deg=relative_angle
         )
     
     def _add_global_feature(self, wx: float, wy: float, val: float):
@@ -568,16 +595,15 @@ class RingSonarRenderer:
         self.grid_width = int(core.world_width / self.grid_resolution)
         self.grid_height = int(core.world_height / self.grid_resolution)
         
-        # 使用三个独立的地图层
-        # free_map: 记录无障碍区域的累积置信度 (0-255)
-        # obstacle_map: 记录障碍物位置的累积置信度 (0-255)
-        # visit_count: 记录每个栅格被扫描的次数
-        self.free_map = np.zeros((self.grid_height, self.grid_width), dtype=np.uint8)
-        self.obstacle_map = np.zeros((self.grid_height, self.grid_width), dtype=np.uint8)
+        # 占用栅格地图 (0=障碍物, 127=未知, 255=无障碍)
+        self.occupancy_grid = np.ones((self.grid_height, self.grid_width), dtype=np.uint8) * 127
+        # 访问计数：记录每个栅格被扫描的次数
         self.visit_count = np.zeros((self.grid_height, self.grid_width), dtype=np.uint16)
         
-        # 用于显示的融合占用图 (0=障碍物, 127=未知, 255=无障碍)
-        self.occupancy_grid = np.ones((self.grid_height, self.grid_width), dtype=np.uint8) * 127
+        # 障碍物预测地图 (0-255: 0=确定无障碍, 255=确定有障碍)
+        self.obstacle_prediction = np.ones((self.grid_height, self.grid_width), dtype=np.uint8) * 127
+        # 预测置信度 (0-100: 置信度百分比)
+        self.prediction_confidence = np.zeros((self.grid_height, self.grid_width), dtype=np.uint8)
     
     def render(self):
         if self.render_mode is None:
@@ -588,6 +614,7 @@ class RingSonarRenderer:
         self._draw_sensor_fov()
         self._draw_robot()
         self._draw_sensor_readings()
+        self._draw_trigger_info()  # 显示触发模式信息
         self._update_occupancy_grid()
         
         if self.render_mode == "human":
@@ -598,6 +625,30 @@ class RingSonarRenderer:
     def _w2p(self, wx: float, wy: float) -> Tuple[int, int]:
         """世界坐标转像素坐标"""
         return int(wx * self.core.pixel_per_meter), int(wy * self.core.pixel_per_meter)
+    
+    def _draw_direction_arrow(self, img: np.ndarray, cx: int, cy: int, 
+                             angle_rad: float, velocity: float, scale: float = 1.0):
+        """绘制移动方向箭头（统一方法）"""
+        if abs(velocity) > 0.01:  # 移动中
+            speed_factor = min(abs(velocity) / 2.0, 1.0)
+            arrow_len = int(18 * scale * (0.5 + 0.5 * speed_factor))
+            
+            if velocity > 0:  # 前进
+                color = (0, 0, 255)  # 红色
+                thickness = 3
+            else:  # 后退
+                color = (0, 165, 255)  # 橙色
+                thickness = 3
+                angle_rad += math.pi
+                
+            ex = int(cx + math.cos(angle_rad) * arrow_len)
+            ey = int(cy + math.sin(angle_rad) * arrow_len)
+            cv2.arrowedLine(img, (cx, cy), (ex, ey), color, thickness)
+        else:  # 静止
+            arrow_len = int(18 * scale * 0.6)
+            ex = int(cx + math.cos(angle_rad) * arrow_len)
+            ey = int(cy + math.sin(angle_rad) * arrow_len)
+            cv2.arrowedLine(img, (cx, cy), (ex, ey), (255, 200, 100), 2)
     
     def _draw_obstacles(self):
         """绘制障碍物"""
@@ -618,11 +669,10 @@ class RingSonarRenderer:
         r = int(self.core.robot_size * ppm)
         cv2.circle(self.world_img, (cx, cy), r, (0, 255, 0), -1)
         
-        # 绘制机器人朝向
-        L = int(18 * ppm / 20)
-        ex = int(cx + math.cos(math.radians(self.core.robot_angle)) * L)
-        ey = int(cy + math.sin(math.radians(self.core.robot_angle)) * L)
-        cv2.arrowedLine(self.world_img, (cx, cy), (ex, ey), (0, 0, 255), 3)
+        # 绘制移动方向箭头
+        angle_rad = math.radians(self.core.robot_angle)
+        self._draw_direction_arrow(self.world_img, cx, cy, angle_rad, 
+                                   self.core.velocity, ppm / 20)
         
         # 绘制传感器环
         ring_r = int(self.core.sensor_ring_radius * ppm)
@@ -635,12 +685,17 @@ class RingSonarRenderer:
             cv2.circle(self.world_img, (sx_pix, sy_pix), 3, (255, 0, 255), -1)
     
     def _draw_sensor_fov(self):
-        """绘制所有传感器的FoV扇区"""
+        """绘制传感器的FoV扇区（根据触发模式）"""
         ppm = self.core.pixel_per_meter
-        
         overlay = np.zeros_like(self.world_img)
         
+        # 使用上一帧激活的传感器（从core的记录中获取）
+        active_sensor_ids = list(self.core.active_sensors_this_frame)
+        
         for sensor in self.core.sensors:
+            # 只绘制激活的传感器
+            if sensor.id not in active_sensor_ids:
+                continue
             # 获取传感器世界位置和朝向
             sx, sy = sensor.get_world_position(self.core.robot_pos, self.core.robot_angle)
             sensor_angle = sensor.get_world_angle(self.core.robot_angle)
@@ -696,84 +751,197 @@ class RingSonarRenderer:
             cv2.putText(self.world_img, text, (text_x, text_y),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
     
+    def _draw_trigger_info(self):
+        """显示触发模式信息"""
+        active_ids = list(self.core.active_sensors_this_frame)
+        
+        # 根据触发模式显示不同信息
+        mode_info = {
+            "sector": ("Sector Polling (3 sensors)", "Warning: May have interference", (380, 85)),
+            "sequential": ("Sequential (1 sensor)", "Status: No interference!", (350, 85)),
+            "interleaved": ("Interleaved (1 sensor)", "Status: 60deg spacing, minimal interference", (420, 85)),
+            "all": ("All Sensors (12 sensors)", "Warning: High interference in real world", (420, 60))
+        }
+        
+        mode, status, box_size = mode_info.get(self.core.trigger_mode, 
+                                               ("Unknown Mode", "Unknown status", (420, 85)))
+        
+        # 绘制信息框
+        cv2.rectangle(self.world_img, (5, 5), box_size, (255, 255, 255), -1)
+        cv2.rectangle(self.world_img, (5, 5), box_size, (0, 0, 0), 2)
+        
+        # 显示触发模式
+        cv2.putText(self.world_img, f"Trigger: {mode}", (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+        
+        # 显示活跃传感器（如果数量少于4个）
+        if len(active_ids) <= 4:
+            angles = [f"{sid * 30}deg" for sid in active_ids]
+            sensor_text = f"Active: {active_ids} ({', '.join(angles)})"
+            cv2.putText(self.world_img, sensor_text, (10, 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 128, 0), 1)
+        
+        # 显示状态
+        color = (0, 200, 0) if "No interference" in status else (0, 100, 200)
+        y_pos = 75 if len(active_ids) <= 4 else 50
+        cv2.putText(self.world_img, status, (10, y_pos),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+    
     def _update_occupancy_grid(self):
-        """更新全局栅格占用图 - 非累积策略，直接设置值"""
-        # 先将所有栅格衰减为灰色（未知）
-        self.occupancy_grid = np.clip(self.occupancy_grid.astype(np.int16) - 1, 127, 255).astype(np.uint8)
+        """更新全局栅格占用图 - 优化版本，使用NumPy数组操作"""
+        # 创建临时标记数组（0=未处理, 1=无障碍, 2=障碍物）
+        temp_grid = np.zeros((self.grid_height, self.grid_width), dtype=np.uint8)
         
-        # 当前帧标记的无障碍区域集合（使用set避免重复）
-        free_cells = set()
-        obstacle_cells = set()
-        
+        # 只使用本帧实际扫描过的传感器
         for sensor in self.core.sensors:
+            if sensor.id not in self.core.active_sensors_this_frame:
+                continue
+                
             # 获取传感器世界位置和朝向
             sx, sy = sensor.get_world_position(self.core.robot_pos, self.core.robot_angle)
             sensor_angle = sensor.get_world_angle(self.core.robot_angle)
-            
-            # 获取该传感器的检测距离
             detected_distance = self.core.sonar_readings[sensor.id]
             
-            # 圆锥形无障碍区域：从传感器位置到检测距离范围内的FoV扇区
+            # 圆锥形FoV扫描
             half_fov = sensor.fov_angle / 2.0
-            
-            # 使用极坐标扫描
-            num_angle_steps = int(sensor.fov_angle / 2) + 1  # 每2度一条射线
+            num_angle_steps = max(3, int(sensor.fov_angle / 2))
             
             for angle_offset in np.linspace(-half_fov, half_fov, num_angle_steps):
                 ray_angle = math.radians(sensor_angle + angle_offset)
+                cos_ray = math.cos(ray_angle)
+                sin_ray = math.sin(ray_angle)
                 
-                # 沿射线前进，收集无障碍区域栅格
-                step = self.grid_resolution * 0.5
-                dist = 0.0
+                # 沿射线标记无障碍区域
+                num_steps = max(2, int(detected_distance / (self.grid_resolution * 0.5)))
+                distances = np.linspace(0, detected_distance, num_steps)
                 
-                while dist < detected_distance:
-                    dist += step
-                    # 世界坐标
-                    wx = sx + math.cos(ray_angle) * dist
-                    wy = sy + math.sin(ray_angle) * dist
-                    
-                    # 转换为栅格坐标
-                    gx = int(wx / self.grid_resolution)
-                    gy = int(wy / self.grid_resolution)
-                    
-                    # 检查边界
-                    if 0 <= gx < self.grid_width and 0 <= gy < self.grid_height:
-                        free_cells.add((gx, gy))
+                wx = sx + cos_ray * distances
+                wy = sy + sin_ray * distances
                 
-                # 在检测距离处收集可能的障碍物栅格（如果未达到最大距离）
+                gx = (wx / self.grid_resolution).astype(int)
+                gy = (wy / self.grid_resolution).astype(int)
+                
+                # 过滤边界内的点
+                valid = (gx >= 0) & (gx < self.grid_width) & (gy >= 0) & (gy < self.grid_height)
+                temp_grid[gy[valid], gx[valid]] = 1  # 标记为无障碍
+                
+                # 标记障碍物（如果未达到最大距离）
                 if detected_distance < sensor.max_range * 0.95:
-                    wx = sx + math.cos(ray_angle) * detected_distance
-                    wy = sy + math.sin(ray_angle) * detected_distance
+                    wx_obs = sx + cos_ray * detected_distance
+                    wy_obs = sy + sin_ray * detected_distance
+                    gx_obs = int(wx_obs / self.grid_resolution)
+                    gy_obs = int(wy_obs / self.grid_resolution)
                     
-                    gx = int(wx / self.grid_resolution)
-                    gy = int(wy / self.grid_resolution)
-                    
-                    if 0 <= gx < self.grid_width and 0 <= gy < self.grid_height:
-                        obstacle_cells.add((gx, gy))
+                    if 0 <= gx_obs < self.grid_width and 0 <= gy_obs < self.grid_height:
+                        if temp_grid[gy_obs, gx_obs] == 0:  # 只在未标记为无障碍时设置
+                            temp_grid[gy_obs, gx_obs] = 2  # 标记为障碍物
         
-        # 直接设置栅格值（非累积）
-        # 无障碍区域：白色（255）
-        for gx, gy in free_cells:
-            self.occupancy_grid[gy, gx] = 255
-            self.visit_count[gy, gx] = min(65535, self.visit_count[gy, gx] + 1)
+        # 批量更新占用栅格
+        free_mask = (temp_grid == 1)
+        obstacle_mask = (temp_grid == 2)
         
-        # 障碍物区域：只有不在无障碍区域内才标记为障碍物
-        for gx, gy in obstacle_cells:
-            if (gx, gy) not in free_cells:
-                # 障碍物边缘：深灰到黑色
-                self.occupancy_grid[gy, gx] = 50
-                self.visit_count[gy, gx] = min(65535, self.visit_count[gy, gx] + 1)
+        self.occupancy_grid[free_mask] = 255
+        self.occupancy_grid[obstacle_mask] = 50
+        
+        # 更新访问计数（防止溢出）
+        visited_mask = (temp_grid > 0)
+        self.visit_count[visited_mask] = np.minimum(65535, self.visit_count[visited_mask] + 1)
+        
+        # 更新障碍物预测
+        self._predict_obstacles()
     
-    def _fuse_occupancy_maps(self):
-        """融合已弃用 - 现在直接在_update_occupancy_grid中设置值"""
-        pass
+    def _predict_obstacles(self):
+        """
+        基于扩散模型预测障碍物位置
+        
+        核心思想：
+        1. 空闲空间的边界很可能是障碍物
+        2. 使用形态学操作检测边界
+        3. 基于周围空闲空间密度计算置信度
+        """
+        # 创建二值化地图：已知空闲区域
+        free_space = (self.occupancy_grid > 200).astype(np.uint8)
+        known_obstacles = (self.occupancy_grid < 80).astype(np.uint8)
+        
+        # 方法1: 边界检测 - 空闲空间边缘扩散
+        # 膨胀空闲区域，找到边界
+        kernel_size = 3
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        
+        # 膨胀空闲区域（扩散1-2个栅格）
+        dilated_free = cv2.dilate(free_space, kernel, iterations=2)
+        
+        # 边界 = 膨胀区域 - 原始空闲区域
+        boundary = cv2.subtract(dilated_free, free_space)
+        
+        # 排除已知的空闲区域和已知的障碍物
+        unknown_mask = (self.occupancy_grid > 100) & (self.occupancy_grid < 200)
+        potential_obstacles = boundary & unknown_mask.astype(np.uint8)
+        
+        # 方法2: 基于邻域密度的概率扩散
+        # 计算每个栅格周围的空闲空间密度
+        kernel_large = np.ones((5, 5), dtype=np.float32) / 25.0
+        free_density = cv2.filter2D(free_space.astype(np.float32), -1, kernel_large)
+        
+        # 高密度空闲空间边缘 -> 高概率障碍物
+        # 使用梯度检测密度变化
+        gradient_x = cv2.Sobel(free_density, cv2.CV_32F, 1, 0, ksize=3)
+        gradient_y = cv2.Sobel(free_density, cv2.CV_32F, 0, 1, ksize=3)
+        gradient_magnitude = np.sqrt(gradient_x**2 + gradient_y**2)
+        
+        # 归一化梯度到 0-255
+        if gradient_magnitude.max() > 0:
+            gradient_norm = (gradient_magnitude / gradient_magnitude.max() * 255).astype(np.uint8)
+        else:
+            gradient_norm = np.zeros_like(gradient_magnitude, dtype=np.uint8)
+        
+        # 方法3: 方向性扩散 - 考虑传感器视线方向
+        # 从机器人位置向外扩散，未访问区域在已知空闲区域后方可能是障碍物
+        robot_gx = int(self.core.robot_pos[0] / self.grid_resolution)
+        robot_gy = int(self.core.robot_pos[1] / self.grid_resolution)
+        
+        # 创建距离地图
+        y_coords, x_coords = np.ogrid[:self.grid_height, :self.grid_width]
+        distance_from_robot = np.sqrt((x_coords - robot_gx)**2 + (y_coords - robot_gy)**2)
+        
+        # 综合预测：组合多种方法
+        # 权重：边界检测(40%) + 梯度检测(40%) + 距离衰减(20%)
+        prediction = np.zeros_like(self.obstacle_prediction, dtype=np.float32)
+        
+        # 边界贡献：边界区域标记为可能的障碍物
+        prediction += potential_obstacles.astype(np.float32) * 200.0 * 0.4
+        
+        # 梯度贡献：梯度大的区域可能是障碍物
+        prediction += gradient_norm.astype(np.float32) * 0.4
+        
+        # 距离衰减：离机器人远且未访问的区域，降低预测置信度
+        distance_factor = np.clip(1.0 - distance_from_robot / (self.grid_width * 0.3), 0, 1)
+        unvisited_mask = (self.visit_count == 0).astype(np.float32)
+        prediction += gradient_norm.astype(np.float32) * distance_factor * unvisited_mask * 0.2
+        
+        # 裁剪到 0-255
+        prediction = np.clip(prediction, 0, 255).astype(np.uint8)
+        
+        # 已知区域保持不变
+        prediction[free_space > 0] = 0  # 已知空闲 -> 预测为无障碍
+        prediction[known_obstacles > 0] = 255  # 已知障碍 -> 预测为障碍
+        
+        # 计算置信度：基于周围已知信息的数量
+        kernel_conf = np.ones((5, 5), dtype=np.float32)
+        known_mask = ((self.occupancy_grid < 80) | (self.occupancy_grid > 200)).astype(np.float32)
+        confidence = cv2.filter2D(known_mask, -1, kernel_conf) / 25.0 * 100
+        confidence = np.clip(confidence, 0, 100).astype(np.uint8)
+        
+        # 更新预测地图
+        self.obstacle_prediction = prediction
+        self.prediction_confidence = confidence
     
     def reset_grid(self):
         """重置栅格地图"""
-        self.free_map.fill(0)
-        self.obstacle_map.fill(0)
         self.visit_count.fill(0)
         self.occupancy_grid.fill(127)
+        self.obstacle_prediction.fill(127)
+        self.prediction_confidence.fill(0)
     
     def _show_windows(self):
         """显示窗口"""
@@ -821,16 +989,15 @@ class RingSonarRenderer:
         # 转换为彩色图以绘制机器人
         grid_color = cv2.cvtColor(grid_vis, cv2.COLOR_GRAY2BGR)
         
-        # 绘制机器人（红色圆圈）
+        # 绘制机器人和方向箭头
         if 0 <= robot_gx < self.grid_width and 0 <= robot_gy < self.grid_height:
             robot_r = max(2, int(self.core.robot_size / self.grid_resolution))
             cv2.circle(grid_color, (robot_gx, robot_gy), robot_r, (0, 0, 255), -1)
             
-            # 绘制朝向
-            arrow_len = robot_r + 5
-            end_x = int(robot_gx + math.cos(math.radians(self.core.robot_angle)) * arrow_len)
-            end_y = int(robot_gy + math.sin(math.radians(self.core.robot_angle)) * arrow_len)
-            cv2.arrowedLine(grid_color, (robot_gx, robot_gy), (end_x, end_y), (0, 0, 255), 2)
+            # 使用统一的箭头绘制方法
+            angle_rad = math.radians(self.core.robot_angle)
+            self._draw_direction_arrow(grid_color, robot_gx, robot_gy, angle_rad, 
+                                      self.core.velocity, 1.0)
         
         # 缩放显示
         scale_factor = max(1, 600 // max(self.grid_width, self.grid_height))
@@ -857,6 +1024,78 @@ class RingSonarRenderer:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
         
         cv2.imshow("Occupancy Grid", grid_display)
+        
+        # 障碍物预测地图可视化
+        self._show_obstacle_prediction()
+    
+    def _show_obstacle_prediction(self):
+        """显示障碍物预测地图"""
+        # 创建热力图：0=无障碍(蓝), 127=未知(绿), 255=障碍(红)
+        prediction_colored = cv2.applyColorMap(self.obstacle_prediction, cv2.COLORMAP_JET)
+        
+        # 叠加置信度（透明度）
+        # 高置信度区域更不透明
+        confidence_alpha = (self.prediction_confidence / 100.0 * 0.8 + 0.2)  # 0.2-1.0
+        
+        # 在预测图上标记已知信息
+        # 已知空闲：绿色边框
+        free_mask = (self.occupancy_grid > 200)
+        prediction_colored[free_mask] = [0, 255, 0]  # 绿色
+        
+        # 已知障碍：红色边框
+        obstacle_mask = (self.occupancy_grid < 80)
+        prediction_colored[obstacle_mask] = [0, 0, 255]  # 红色
+        
+        # 标记机器人位置
+        robot_gx = int(self.core.robot_pos[0] / self.grid_resolution)
+        robot_gy = int(self.core.robot_pos[1] / self.grid_resolution)
+        
+        if 0 <= robot_gx < self.grid_width and 0 <= robot_gy < self.grid_height:
+            robot_r = max(2, int(self.core.robot_size / self.grid_resolution))
+            cv2.circle(prediction_colored, (robot_gx, robot_gy), robot_r, (255, 255, 255), -1)
+            
+            # 绘制方向箭头
+            angle_rad = math.radians(self.core.robot_angle)
+            self._draw_direction_arrow(prediction_colored, robot_gx, robot_gy, angle_rad, 
+                                      self.core.velocity, 1.0)
+        
+        # 缩放显示
+        scale_factor = max(1, 600 // max(self.grid_width, self.grid_height))
+        pred_display = cv2.resize(prediction_colored, 
+                                  (self.grid_width * scale_factor, self.grid_height * scale_factor),
+                                  interpolation=cv2.INTER_NEAREST)
+        
+        # 计算统计信息
+        predicted_obstacles = np.sum((self.obstacle_prediction > 180) & 
+                                     (self.occupancy_grid > 100) & 
+                                     (self.occupancy_grid < 200))
+        avg_confidence = np.mean(self.prediction_confidence[self.prediction_confidence > 0])
+        high_conf_predictions = np.sum(self.prediction_confidence > 70)
+        
+        # 添加标题和统计信息
+        cv2.putText(pred_display, "Obstacle Prediction (Diffusion Model)", (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(pred_display, f"Predicted Obstacles: {predicted_obstacles}", (10, 50),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        cv2.putText(pred_display, f"Avg Confidence: {avg_confidence:.1f}%", (10, 70),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        cv2.putText(pred_display, f"High Conf Cells: {high_conf_predictions}", (10, 90),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        # 图例
+        legend_y = pred_display.shape[0] - 60
+        cv2.putText(pred_display, "Legend:", (10, legend_y),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        cv2.rectangle(pred_display, (10, legend_y + 5), (30, legend_y + 15), (0, 255, 0), -1)
+        cv2.putText(pred_display, "= Known Free", (35, legend_y + 15),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+        cv2.rectangle(pred_display, (10, legend_y + 20), (30, legend_y + 30), (0, 0, 255), -1)
+        cv2.putText(pred_display, "= Known Obstacle", (35, legend_y + 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+        cv2.putText(pred_display, "Blue->Red = Predicted Probability", (10, legend_y + 45),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+        
+        cv2.imshow("Obstacle Prediction", pred_display)
 
 
 # ------------------------------- 主程序 -------------------------------- #
@@ -865,17 +1104,30 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Ring Sonar Simulator')
     parser.add_argument('--headless', action='store_true', help='无可视化模式')
     parser.add_argument('--realtime', action='store_true', help='实时速度运行')
-    parser.add_argument('--steps', type=int, default=1000, help='仿真步数')
+    parser.add_argument('--steps', type=int, default=10000000, help='仿真步数')
     parser.add_argument('--world-size', type=float, default=40.0, help='世界大小(米)')
+    parser.add_argument('--speed', type=float, default=1.0, help='速度倍率 (0.5=慢一倍, 2.0=快一倍)')
+    parser.add_argument('--trigger-mode', type=str, default='sequential', 
+                       choices=['sequential', 'interleaved', 'sector', 'all'], 
+                       help='传感器触发模式:\n'
+                            '  sequential=顺序扫描(推荐,无干扰)\n'
+                            '  interleaved=交错扫描(60°间隔,低干扰)\n'
+                            '  sector=扇区轮询(可能有干扰)\n'
+                            '  all=全部触发(高干扰)')
     args = parser.parse_args()
     
     print("启动环形超声波雷达模拟器...")
     print(f"  - 无界面模式: {args.headless}")
     print(f"  - 实时模式: {args.realtime}")
+    print(f"  - 速度倍率: {args.speed}x")
+    print(f"  - 触发模式: {args.trigger_mode}")
     print(f"  - 仿真步数: {args.steps}")
     print(f"  - 世界大小: {args.world_size}m x {args.world_size}m")
     
-    core = RingSonarCore(world_width=args.world_size, world_height=args.world_size)
+    # 根据速度倍率调整时间步长
+    dt = 0.1 / args.speed
+    core = RingSonarCore(world_width=args.world_size, world_height=args.world_size, 
+                         dt=dt, trigger_mode=args.trigger_mode)
     core.reset(regenerate_map=True)
     
     if not args.headless:

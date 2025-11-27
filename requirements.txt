@@ -1,0 +1,17 @@
+# 核心依赖
+
+## 科学计算
+numpy>=1.24.0
+scipy>=1.10.0
+
+## 图像处理
+opencv-python>=4.8.0
+
+## 绘图
+matplotlib>=3.7.0
+
+## 强化学习
+gymnasium>=0.27.0
+
+## 序列化
+pyyaml>=6.0

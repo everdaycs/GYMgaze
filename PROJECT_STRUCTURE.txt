@@ -1,0 +1,33 @@
+gymGaze/
+├── 核心代码 (4个文件)
+│   ├── ring_sonar_simulator.py    ⭐ 主模拟器
+│   ├── sonar_fisher_calculator.py    Fisher计算
+│   ├── fisher_utils.py               工具函数
+│   └── run.py                        启动脚本
+│
+├── 演示/测试 (5个文件)
+│   ├── demo_obstacle_prediction.py   障碍物预测演示 ⭐
+│   ├── demo_occupancy_grid.py        占用地图演示
+│   ├── demo_ring_sonar.py            基础演示
+│   ├── test_ring_sonar.py            单元测试
+│   └── test_sector_polling.py        触发模式测试
+│
+├── 机器学习 (2个文件，可选)
+│   ├── train_diffusion_model.py      神经网络训练
+│   └── requirements_training.txt     训练依赖
+│
+├── 文档 (8个文件)
+│   ├── README.md                     项目总览
+│   ├── FILES.md                      文件结构
+│   ├── OBSTACLE_PREDICTION.md ⭐     障碍物预测算法
+│   ├── TRIGGER_MODES.md              触发模式说明
+│   ├── SONAR_FISHER_REDESIGN.md      Fisher优化
+│   ├── OCCUPANCY_GRID_FIX.md         地图修复
+│   ├── OPTIMIZATION_LOG.md           优化记录
+│   ├── MOVEMENT_INDICATOR.md         方向显示
+│   └── TRAINING_GUIDE.md             训练指南（高级）
+│
+└── Gymnasium环境 (用于强化学习)
+    └── gymnasium_env/
+
+总计：19个核心文件 + 文档
