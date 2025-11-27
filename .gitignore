@@ -4,16 +4,9 @@ __pycache__/
 *$py.class
 *.so
 .Python
-*.egg-info/
-dist/
-build/
-*.egg
-
-# Virtual Environment
 .venv/
 venv/
 ENV/
-env/
 
 # IDE
 .vscode/
@@ -26,27 +19,8 @@ env/
 .DS_Store
 Thumbs.db
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# Plots and outputs
-*.png
-*.jpg
-*.pdf
+# 项目特定
 fisher_analysis_plots/
-
-# Temporary files
-*.tmp
-*.log
-
-# Model checkpoints
-*.pth
-*.ckpt
-*.h5
-
-# Data
-data/
-datasets/
-
-# Gymnasium generated
-gym_gaze_env.egg-info/
+*.png
+!ring_sonar_layout.png
+!ring_sonar_observations.png

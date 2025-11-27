@@ -1,1 +1,2 @@
 from gymnasium_env_gaze.envs.gaze_env import GazeEnv
+from gymnasium_env_gaze.envs.ring_sonar_env import RingSonarEnv

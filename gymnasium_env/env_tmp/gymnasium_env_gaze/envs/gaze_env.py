@@ -18,11 +18,17 @@ class GazeEnv(gym.Env):
         self.render_mode = render_mode
         # use spherical fibonacci sampling to generate gaze angle
         self.action_space = spaces.Discrete(32)
+        # 12个超声波传感器的距离读数 (单位: 米)
         self.observation_space = spaces.Box(
-            low = -1,high = 255, 
-            shape = (64,64), 
+            low = 0.0, high = 10.0, 
+            shape = (12,), 
             dtype = np.float32
         )
+        
+        # 12个超声波传感器均匀分布在半径15cm的圆盘边缘
+        self.ultrasonic_radius = 0.15  # 15cm
+        self.num_sensors = 12
+        self.sensor_angles = np.linspace(0, 2*np.pi, self.num_sensors, endpoint=False)
         
         self.pixel_per_meter = 5
         self.world_width = 20     # x
@@ -45,21 +51,25 @@ class GazeEnv(gym.Env):
         self.last_control_update = 0.0
 
         # keep robot pos at z = 0 (on the ground)
-        self.robot_pos = np.array([self.world_width / 2, self.world_height / 2, 0], dtype=np.int32)
+        self.robot_pos = np.array([self.world_width / 2, self.world_height / 2, 0], dtype=np.float64)
         self.robot_angle : float = 0.0  # deg, body heading, 0 -> x+
         self.robot_vel : float = 0.0
+        
+        # 主动SLAM运动参数
+        self.angular_velocity : float = 0.0  # rad/s
+        self.max_linear_velocity = 3.0
+        self.max_angular_velocity = 1.0
+        self.robot_size = 0.5  # 机器人半径（米）
+        self.velocity_sample_interval = 5.0
+        self.last_movement_time = 0.0
         
         self._active_gaze_control = False
         self.reset()
 
     def init_env(self):
-        self.sim_time = 0
-        self.last_movement_time = 0
         self.space = np.zeros((self.world_length * self.pixel_per_meter, self.world_width * self.pixel_per_meter, self.world_height * self.pixel_per_meter), int)
         self.gaze_angles = self.sample_fibo_sphere()
         self.gaze_angle = self.gaze_angles[0]
-
-
 
     def generate_obstacles(self):
         nx, ny, nz = self.space.shape
@@ -78,47 +88,30 @@ class GazeEnv(gym.Env):
 
             self.space[x1:x2+1,y1:y2+1,z1:z2+1] = 1
 
-    def next_pos(self) -> np.ndarray:
-        yaw_rad = np.deg2rad(self.robot_angle)
-        dx = self.robot_vel * np.cos(yaw_rad) * self.sim_time
-        dy = self.robot_vel * np.sin(yaw_rad) * self.sim_time
-        next_pos = self.robot_pos.copy()
-        next_pos[0] += dx
-        next_pos[1] += dy 
-
-        return next_pos
-
-    def is_pos_valid(self, pos : np.ndarray) -> bool:
-        ix, iy, iz = np.round(pos).astype(int)
-        nx, ny, nz = self.space.shape
-        if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
-            return False
-        return self.space[ix, iy, iz] == 0
-
     def step(self, action) -> Tuple[np.ndarray, float, bool, bool, dict]:
         assert self.action_space.contains(action), f"Invalid action {action}"
 
-        self.sim_time+=self.dt
-        self.robot_pos = self.next_pos() if self.is_pos_valid(self.next_pos()) else self.robot_pos
+        self.sim_time += self.dt
+        
+        # 设置凝视角度（从动作空间）
         self.gaze_angle = self.gaze_angles[int(action)]
+        
+        # 主动SLAM运动逻辑
+        self.sample_movement()
+        self.move()
+        
+        # 获取传感器观测
         observation = self._get_obs()
         
         # 更新 Fisher 地图
         self.update_maps()
-        # print(self.global_feature_map)
         
-        self.sample_movement()
-        if not self.check_out_of_bounds():
-            self.move()
-        else: 
-            # find a new direction if collide
-            self.sample_movement(force = True)
         reward = self.get_reward()
         info = {
             "current pos" : self.robot_pos,
             "current chassis angle" : self.robot_angle,
             "current gaze_angle" : self.gaze_angle    
-                }
+        }
         truncated = False
         terminated = self.sim_time > 100
         return observation, reward, terminated, truncated, info
@@ -161,22 +154,51 @@ class GazeEnv(gym.Env):
         super().reset(seed=seed, options=options)
         self.init_env()
         self.generate_obstacles()
-        self.robot_pos = np.array([self.world_width / 2, self.world_height / 2, 0], dtype=np.int32)
-        while self.space[tuple(self.robot_pos)]:
-            # prevent robot stuck inside obstacle
-            self.robot_pos = np.array([self.world_width / 2, self.world_height / 2, 0], dtype=np.int32)
-        self.robot_angle = 0.0
+        
+        # 寻找安全的起始位置
+        self.robot_pos = self._find_safe_start()
+        self.robot_angle = float(np.random.randint(0, 360))
         self.robot_vel = 0.0
+        self.angular_velocity = 0.0
         
         # 重置特征地图
         self.feature_map.fill(0.0)
         self.global_feature_map.fill(0.0)
         self._prev_nonzero_count = 0
         
+        # 重置时间
+        self.sim_time = 0.0
+        self.last_movement_time = 0.0
+        
         observation = self._get_obs()
-        self.sample_movement(force = True)
+        self.sample_movement(force=True)
 
         return observation, {}
+    
+    def _find_safe_start(self) -> np.ndarray:
+        """寻找一个不会碰撞的起始位置"""
+        margin = self.robot_size + 0.5
+        
+        # 尝试100次随机位置
+        for _ in range(100):
+            x = np.random.uniform(margin, self.world_width - margin)
+            y = np.random.uniform(margin, self.world_height - margin)
+            z = 0.0
+            pos = np.array([x, y, z], dtype=np.float64)
+            if not self.check_collision(pos):
+                return pos
+        
+        # 如果找不到，尝试中心点
+        center = np.array([self.world_width / 2, self.world_height / 2, 0.0], dtype=np.float64)
+        if not self.check_collision(center):
+            return center
+        
+        # 最后的备选：强制返回边界内的位置
+        return np.array([
+            clamp(self.world_width / 2, margin, self.world_width - margin),
+            clamp(self.world_height / 2, margin, self.world_height - margin),
+            0.0
+        ], dtype=np.float64)
     
     def sample_fibo_sphere(self) -> np.ndarray:
         # remove gaze angle that point to lower hemisphere
@@ -198,50 +220,105 @@ class GazeEnv(gym.Env):
 
     
     def ray_marching(self):
-        return fast_ray_marching(self.pixel_per_meter, self.robot_angle, self.gaze_angle, self.robot_pos, self.space, self.global_feature_map, self.global_feature_map_size, self.feature_map_res)
+        return ultrasonic_ray_marching(
+            self.pixel_per_meter, 
+            self.robot_angle, 
+            self.robot_pos, 
+            self.space, 
+            self.global_feature_map, 
+            self.global_feature_map_size, 
+            self.feature_map_res,
+            self.ultrasonic_radius,
+            self.sensor_angles
+        )
 
     def _get_obs(self):
-        cam_obs, self.global_feature_map = self.ray_marching()
-        return cam_obs
+        distances, self.global_feature_map = self.ray_marching()
+        return distances
 
-    def sample_movement(self, force : bool = False):
+    def sample_movement(self, force: bool = False):
+        """主动SLAM移动逻辑：速度采样"""
         r = np.random.rand()
         
-        if (r >= 0.5 and self.sim_time - self.last_movement_time > 1) or force:
+        if (r >= 0.5 and self.sim_time - self.last_movement_time > self.velocity_sample_interval) or force:
             self.last_movement_time = self.sim_time
-            self.robot_angle += np.random.randint(10,100)
-            self.robot_angle %= 360.0
-            self.robot_vel = float(np.random.randint(10))
+            # 线速度和角速度采样
+            self.robot_vel = float(np.random.uniform(-self.max_linear_velocity, self.max_linear_velocity))
+            self.angular_velocity = float(np.random.uniform(-self.max_angular_velocity, self.max_angular_velocity))
 
-    def check_out_of_bounds(self):
-        next_pos = [int(self.robot_pos[0] + self.robot_vel*np.sin(self.robot_angle)*self.dt), int(self.robot_pos[1] + self.robot_vel*np.cos(self.robot_angle)*self.dt)]
-        if (any([pos < 0 for pos in next_pos]) or next_pos[0] >= self.world_width or next_pos[1] >= self.world_length):
-            return True  # Fixed: Return True when out of bounds
-        return False
+    def check_collision(self, target_pos: np.ndarray) -> bool:
+        """检查目标位置是否碰撞"""
+        ix = int(round(target_pos[0] * self.pixel_per_meter))
+        iy = int(round(target_pos[1] * self.pixel_per_meter))
+        iz = int(round(target_pos[2] * self.pixel_per_meter))
         
-    def discovery_reward(self):
-
-        pass
-
-    def gaze_reward(self):
-        pass
+        # 边界检查
+        if ix < 0 or ix >= self.space.shape[0] or iy < 0 or iy >= self.space.shape[1] or iz < 0 or iz >= self.space.shape[2]:
+            return True
+            
+        # 障碍物检查
+        return self.space[ix, iy, iz] == 1
+        
+    def handle_collision(self):
+        """碰撞处理：反向运动并添加随机扰动"""
+        self.robot_vel = clamp(-self.robot_vel * np.random.uniform(0.5, 1.0) + np.random.uniform(-0.5, 0.5),
+                               -self.max_linear_velocity, self.max_linear_velocity)
+        if abs(self.angular_velocity) < 0.1:
+            self.angular_velocity = np.random.choice([-1, 1]) * np.random.uniform(0.3, 0.8)
+        else:
+            self.angular_velocity = clamp(-self.angular_velocity + np.random.uniform(-0.2, 0.2),
+                                          -self.max_angular_velocity, self.max_angular_velocity)
 
     def move(self):
-        self.robot_pos[0] += self.robot_vel*np.sin(self.robot_angle)*self.dt
-        self.robot_pos[1] += self.robot_vel*np.cos(self.robot_angle)*self.dt
+        """主动SLAM移动更新：包含角速度、线速度和碰撞处理"""
+        # 更新角度（角速度积分）
+        new_angle = (self.robot_angle + np.rad2deg(self.angular_velocity * self.dt)) % 360.0
+        
+        # 计算新位置（线速度积分）
+        new_pos = self.robot_pos.copy()
+        new_pos[0] += np.cos(np.deg2rad(self.robot_angle)) * self.robot_vel * self.dt
+        new_pos[1] += np.sin(np.deg2rad(self.robot_angle)) * self.robot_vel * self.dt
+        
+        # 限制在世界范围内
+        new_pos[0] = clamp(new_pos[0], self.robot_size, self.world_width - self.robot_size)
+        new_pos[1] = clamp(new_pos[1], self.robot_size, self.world_height - self.robot_size)
+        
+        # 碰撞检测和处理
+        if self.check_collision(new_pos):
+            self.handle_collision()
+        else:
+            self.robot_pos = new_pos
+            self.robot_angle = new_angle
 
     def render(self):
         mode = self.render_mode
-        # simple rendering: return depth image
-        img = self._get_obs()
+        # 获取12个传感器的距离读数
+        distances = self._get_obs()
         if mode == "rgb_array":
-            # scale to [0,255], -1 -> max dist (visualization)
-            vis = img.copy()
-            mask = vis < 0
-            vis[mask] = self.max_ray_distance
-            vis = (vis / self.max_ray_distance * 255.0).clip(0,255).astype(np.uint8)
-            # repeat to RGB
-            return np.stack([vis, vis, vis], axis=-1)
+            # 创建一个简单的可视化图像
+            vis = np.zeros((200, 200, 3), dtype=np.uint8)
+            center = (100, 100)
+            
+            # 绘制机器人（圆形）
+            import cv2
+            cv2.circle(vis, center, 10, (255, 255, 255), -1)
+            
+            # 绘制传感器读数
+            yaw_rad = np.deg2rad(self.robot_angle)
+            for i, dist in enumerate(distances):
+                angle = self.sensor_angles[i] + yaw_rad
+                # 传感器位置
+                sx = int(center[0] + self.ultrasonic_radius * 100 * np.cos(angle))
+                sy = int(center[1] + self.ultrasonic_radius * 100 * np.sin(angle))
+                # 障碍物位置
+                ex = int(sx + dist * 10 * np.cos(angle))
+                ey = int(sy + dist * 10 * np.sin(angle))
+                
+                color = (0, 255, 0) if dist < 10.0 else (255, 0, 0)
+                cv2.line(vis, (sx, sy), (ex, ey), color, 1)
+                cv2.circle(vis, (sx, sy), 2, (0, 255, 255), -1)
+            
+            return vis
         elif mode == "human":
             # show using matplotlib if available
             try:
@@ -251,37 +328,81 @@ class GazeEnv(gym.Env):
                     plt.ion()
                     plt.show()
                 
-                self._ax_human[0].clear()
-                self._ax_human[0].imshow(img, cmap="gray", vmin=-1, vmax=self.max_ray_distance)
-                self._ax_human[0].set_title(f"bot view")
-                self._ax_human[0].axis('off')
+                # 重新布局：2x2子图
+                if len(self._ax_human.shape) == 1:
+                    plt.close(self._fig_human)
+                    self._fig_human, self._ax_human = plt.subplots(2, 2, figsize=(14, 12))
+                    plt.ion()
                 
-                self._ax_human[1].clear()
+                # 左上：超声波传感器读数
+                self._ax_human[0, 0].clear()
+                angles_deg = np.rad2deg(self.sensor_angles)
+                self._ax_human[0, 0].plot(angles_deg, distances, 'bo-', linewidth=2, markersize=8)
+                self._ax_human[0, 0].axhline(y=1.0, color='r', linestyle='--', alpha=0.5, label='Warning')
+                self._ax_human[0, 0].set_xlabel("Sensor Angle (deg)")
+                self._ax_human[0, 0].set_ylabel("Distance (m)")
+                self._ax_human[0, 0].set_title(f"Ultrasonic (min: {np.min(distances):.2f}m)")
+                self._ax_human[0, 0].set_ylim([0, 10])
+                self._ax_human[0, 0].grid(True)
+                self._ax_human[0, 0].legend()
+                
+                # 右上：Fisher信息地图
+                self._ax_human[0, 1].clear()
                 z_proj = np.max(self.feature_map, axis=2)
                 vmax = np.max(z_proj)
                 if vmax > 0:
-                    self._ax_human[1].imshow(z_proj, cmap="jet", vmin=0, vmax=vmax)
+                    self._ax_human[0, 1].imshow(z_proj, cmap="jet", vmin=0, vmax=vmax, origin='lower')
                 else:
-                    self._ax_human[1].imshow(z_proj, cmap="jet", vmin=0, vmax=1)
-                self._ax_human[1].set_title("feature map")
-                self._ax_human[1].axis('off')
+                    self._ax_human[0, 1].imshow(z_proj, cmap="jet", vmin=0, vmax=1, origin='lower')
                 
                 cx, cy = self.feature_map_size // 2, self.feature_map_size // 2
-                self._ax_human[1].plot(cx, cy, 'wo', markersize=6)
+                self._ax_human[0, 1].plot(cx, cy, 'wo', markersize=8)
                 
                 L = 10
                 ex = cx + np.cos(np.deg2rad(self.robot_angle)) * L
                 ey = cy + np.sin(np.deg2rad(self.robot_angle)) * L
-                self._ax_human[1].plot([cx, ex], [cy, ey], 'w-', linewidth=2)
-                
-                gx = cx + self.gaze_angle[0] * L
-                gy = cy + self.gaze_angle[1] * L
-                self._ax_human[1].plot([cx, gx], [cy, gy], 'y-', linewidth=2)
+                self._ax_human[0, 1].arrow(cx, cy, ex-cx, ey-cy, head_width=3, head_length=2, 
+                                          fc='white', ec='white', linewidth=2)
                 
                 stats = self.fisher_map_stats()
+                self._ax_human[0, 1].set_title(f"Fisher Map ({int(stats['total_features'])} features)")
+                self._ax_human[0, 1].axis('off')
+                
+                # 左下：状态信息
+                self._ax_human[1, 0].clear()
+                self._ax_human[1, 0].axis('off')
+                status_text = (
+                    f"=== Robot State ===\n"
+                    f"Pos: [{self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f}]m\n"
+                    f"Heading: {self.robot_angle:.1f}°\n"
+                    f"Lin Vel: {self.robot_vel:.2f} m/s\n"
+                    f"Ang Vel: {np.rad2deg(self.angular_velocity):.2f} °/s\n\n"
+                    f"=== Simulation ===\n"
+                    f"Time: {self.sim_time:.1f}s\n\n"
+                    f"=== Fisher Stats ===\n"
+                    f"Features: {int(stats['total_features'])}\n"
+                    f"Mean: {stats['mean_fisher']:.3f}\n"
+                    f"Density: {stats['density']:.3f}"
+                )
+                self._ax_human[1, 0].text(0.1, 0.5, status_text, fontsize=10, family='monospace',
+                                         verticalalignment='center')
+                
+                # 右下：极坐标雷达图
+                self._ax_human[1, 1].clear()
+                self._ax_human[1, 1].remove()
+                self._ax_human[1, 1] = self._fig_human.add_subplot(2, 2, 4, projection='polar')
+                theta = self.sensor_angles
+                r = distances
+                self._ax_human[1, 1].plot(theta, r, 'bo-', linewidth=2, markersize=8)
+                self._ax_human[1, 1].fill(theta, r, alpha=0.25)
+                self._ax_human[1, 1].set_ylim([0, 10])
+                self._ax_human[1, 1].set_theta_zero_location('N')
+                self._ax_human[1, 1].set_theta_direction(-1)
+                self._ax_human[1, 1].set_title("Radar View", pad=20)
+                self._ax_human[1, 1].grid(True)
                 
                 plt.tight_layout()
-                plt.pause(0.001)
+                plt.pause(0.01)
                 
             except Exception as e:
                 print(f" {e}")
@@ -498,6 +619,72 @@ class GazeEnv(gym.Env):
             "max_value": max_val,
             "nonzero_count": len(nonzero)
         }
+@nb.njit(parallel=False, fastmath=True)
+def ultrasonic_ray_marching(ppm, bot_angle, robot_pos, space, global_feature_map, global_size, global_res, ultrasonic_radius, sensor_angles):
+    """
+    12个超声波传感器的射线投射
+    传感器均匀分布在半径15cm的圆盘边缘，平行于机器人前进方向发射
+    """
+    copy_global_feature = global_feature_map.copy()
+    max_ray_distance = 10 * ppm  # 最大检测距离
+    num_sensors = len(sensor_angles)
+    distances = np.full(num_sensors, max_ray_distance / ppm, dtype=np.float32)
+    
+    # 机器人朝向（弧度）
+    yaw_rad = np.deg2rad(bot_angle)
+    cos_yaw = np.cos(yaw_rad)
+    sin_yaw = np.sin(yaw_rad)
+    
+    for i in range(num_sensors):
+        # 传感器相对机器人中心的位置（圆盘边缘）
+        local_x = ultrasonic_radius * np.cos(sensor_angles[i])
+        local_y = ultrasonic_radius * np.sin(sensor_angles[i])
+        
+        # 旋转到世界坐标系
+        sensor_x = robot_pos[0] + local_x * cos_yaw - local_y * sin_yaw
+        sensor_y = robot_pos[1] + local_x * sin_yaw + local_y * cos_yaw
+        sensor_z = robot_pos[2]
+        
+        sensor_pos = np.array([sensor_x, sensor_y, sensor_z], dtype=np.float32)
+        
+        # 传感器朝向（与机器人朝向一致，水平发射）
+        ray_dir = np.array([cos_yaw, sin_yaw, 0.0], dtype=np.float32)
+        
+        # 射线投射
+        step = 0.1
+        length = 0.0
+        hit = -1.0
+        
+        while length <= max_ray_distance:
+            pos = sensor_pos + ray_dir * length
+            ix, iy, iz = np.round(pos).astype(np.int64)
+            
+            # 边界检查
+            if ix < 0 or ix >= space.shape[0] or iy < 0 or iy >= space.shape[1] or iz < 0 or iz >= space.shape[2]:
+                hit = length
+                break
+                
+            # 碰撞检测
+            if space[ix, iy, iz] == 1:
+                hit = length
+                # 添加Fisher信息
+                fisher = compute_fisher_nb(hit, 0.0, bot_angle, 90.0)  # offset=0因为超声波是定向的
+                copy_global_feature = add_global_feature_3d_nb(
+                    copy_global_feature, float(ix), float(iy), float(iz), fisher,
+                    global_size, global_res,
+                    float(space.shape[0]), float(space.shape[1]), float(space.shape[2])
+                )
+                break
+                
+            length += step
+        
+        # 记录距离（转换为米）
+        if hit > 0:
+            distances[i] = hit / ppm
+        else:
+            distances[i] = max_ray_distance / ppm
+    
+    return distances, copy_global_feature
         
 @nb.njit(parallel=True, fastmath=True)
 def fast_ray_marching(ppm, bot_angle, gaze_angle, robot_pos, space, global_feature_map, global_size, global_res):
