@@ -4,16 +4,9 @@ __pycache__/
 *$py.class
 *.so
 .Python
-*.egg-info/
-dist/
-build/
-*.egg
-
-# Virtual Environment
 .venv/
 venv/
 ENV/
-env/
 
 # IDE
 .vscode/
@@ -26,27 +19,23 @@ env/
 .DS_Store
 Thumbs.db
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# Plots and outputs
-*.png
-*.jpg
-*.pdf
+# 项目特定
 fisher_analysis_plots/
 
-# Temporary files
-*.tmp
-*.log
-
-# Model checkpoints
+# 训练数据和模型（太大，不上传）
 *.pth
-*.ckpt
-*.h5
+*.pkl
+diffusion_training_data/
+global_map_training_data/
+training_data/
+obstacle_prediction_data/
 
-# Data
-data/
-datasets/
+# 演示输出
+global_map_prediction_demo/
+*.png
+!ring_sonar_layout.png
+!ring_sonar_observations.png
 
-# Gymnasium generated
-gym_gaze_env.egg-info/
+# 日志
+*.log
+nohup.out
