@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-全局地图预测数据收集脚本 (增强版)
+全局地图预测训练数据收集脚本
 
-目标：训练一个类似SLAM的全局地图重建模型
-- 输入：时间窗口内的局部观测 + 全局累积信息
-- 输出：完整的全局地图预测
-
-增强特性：
-1. 多样化障碍物形状：矩形、圆形、L形、T形、多边形等
-2. 多样化地图边界：开放、封闭、部分墙壁、迷宫入口等
-3. 障碍物重叠和聚合
-4. 不同密度场景
+收集多样化的地图数据用于训练全局地图预测模型
 """
 
 import numpy as np
 import cv2
 import os
+import sys
 import pickle
 import argparse
 import math
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional
 
+# 添加项目根目录到路径
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from ring_sonar_simulator import RingSonarCore, RingSonarRenderer
+from configs import (
+    SimulationConfig, RobotPhysicsConfig, SensorConfig, WorldConfig,
+    DEFAULT_CONFIG, DATA_COLLECTION_CONFIG, print_config
+)
 
 
 class DiverseMapGenerator:
@@ -566,44 +568,41 @@ class DiverseMapGenerator:
 class GlobalMapDataCollector:
     """收集全局地图预测训练数据（增强版）"""
 
-    def __init__(self, data_dir: str = "./global_map_training_data", 
+    def __init__(self, data_dir: str = "./data/global_map_training_data", 
                  sequence_length: int = 5,
                  grid_size: int = 400,
-                 # 新增：更真实的物理参数
-                 robot_speed_range: Tuple[float, float] = (2.0, 6.0),  # 机器人速度范围 m/s
-                 sensor_trigger_interval: int = 3,  # 传感器触发间隔（每N步触发一次）
-                 dt: float = 0.05):  # 仿真时间步长（秒）
+                 config: SimulationConfig = None):  # 使用配置对象
         self.data_dir = data_dir
         self.sequence_length = sequence_length
         self.grid_size = grid_size
         os.makedirs(data_dir, exist_ok=True)
         
+        # 使用配置对象（如果提供）或使用默认数据收集配置
+        if config is None:
+            config = DATA_COLLECTION_CONFIG
+        self.config = config
+        
         # 边界排除（地图物理边界）
         self.border_margin = 10
         
         # 多样化地图生成器
-        self.map_generator = DiverseMapGenerator()
-        
-        # 真实物理参数
-        self.robot_speed_range = robot_speed_range  # 机器人速度更快
-        self.sensor_trigger_interval = sensor_trigger_interval  # 传感器触发更慢
-        self.dt = dt  # 更细的时间步长
+        self.map_generator = DiverseMapGenerator(
+            world_width=config.world.world_width,
+            world_height=config.world.world_height
+        )
 
     def collect_episode(self, episode_id: int, max_steps: int = 500) -> Dict:
         """收集一个episode的全局地图数据"""
         
-        # 随机选择触发模式（更倾向于现实中常用的模式）
-        # 现实中为避免串扰，通常使用 sequential 或 interleaved
-        trigger_modes = ['sequential', 'interleaved', 'sector']
-        trigger_weights = [0.4, 0.4, 0.2]  # sequential和interleaved更常用
-        selected_trigger_mode = np.random.choice(trigger_modes, p=trigger_weights)
+        # 随机选择触发模式
+        selected_trigger_mode = self.config.get_random_trigger_mode()
         
-        # 创建环境（使用更细的时间步长）
+        # 创建环境（使用配置）
         core = RingSonarCore(
-            world_width=40.0,
-            world_height=40.0,
-            dt=self.dt,  # 更细的时间步长 (50ms)
-            trigger_mode=selected_trigger_mode
+            world_width=self.config.world.world_width,
+            world_height=self.config.world.world_height,
+            trigger_mode=selected_trigger_mode,
+            config=self.config
         )
         renderer = RingSonarRenderer(core, render_mode=None, enable_prediction=False)
         
@@ -634,25 +633,22 @@ class GlobalMapDataCollector:
         
         # 传感器触发计数器
         sensor_trigger_counter = 0
+        # 速度变化计数器
+        velocity_change_counter = 0
 
         for step in range(max_steps):
-            # 随机移动，增加探索多样性（更快的速度）
-            if step % 40 == 0:  # 调整速度变化频率
-                speed = np.random.uniform(*self.robot_speed_range)
-                # 随机前进或后退
-                if np.random.random() > 0.15:  # 85%概率前进
-                    linear_vel = speed
-                else:
-                    linear_vel = -speed * 0.5  # 后退速度较慢
-                    
-                angular_vel = np.random.uniform(-2.0, 2.0)  # 更大的转向范围
-                core.set_velocity(float(linear_vel), float(angular_vel))
+            # 使用配置中的速度变化间隔和随机速度
+            velocity_change_counter += 1
+            if velocity_change_counter >= self.config.robot.velocity_change_interval:
+                velocity_change_counter = 0
+                linear_vel, angular_vel = self.config.robot.get_random_velocity()
+                core.set_velocity(linear_vel, angular_vel)
 
             core.step()
             
-            # 传感器触发控制（模拟真实传感器的触发间隔）
+            # 传感器触发控制（使用配置中的间隔）
             sensor_trigger_counter += 1
-            if sensor_trigger_counter >= self.sensor_trigger_interval:
+            if sensor_trigger_counter >= self.config.robot.sensor_trigger_interval:
                 sensor_trigger_counter = 0
                 renderer._update_occupancy_grid()
                 
@@ -666,7 +662,7 @@ class GlobalMapDataCollector:
 
             # 每隔一段时间保存样本（基于传感器触发后）
             # 采样间隔 = 传感器触发间隔 * 采样倍数
-            sample_interval = self.sensor_trigger_interval * 3  # 每3次传感器触发采样一次
+            sample_interval = self.config.robot.sensor_trigger_interval * 3  # 每3次传感器触发采样一次
             if step % sample_interval == 0 and step > 0:
                 frame = {
                     'local_occupancy': renderer.occupancy_grid.copy(),
@@ -832,35 +828,45 @@ def main():
                        help='收集的episode数量')
     parser.add_argument('--max-steps', type=int, default=800,
                        help='每个episode的最大步数（更多步数因为dt更小）')
-    parser.add_argument('--data-dir', type=str, default='./global_map_training_data',
+    parser.add_argument('--data-dir', type=str, default='./data/global_map_training_data',
                        help='数据保存目录')
     parser.add_argument('--sequence-length', type=int, default=5,
                        help='时间序列长度')
     
-    # 新增：真实物理参数
-    parser.add_argument('--robot-speed-min', type=float, default=2.0,
-                       help='机器人最小速度 (m/s)')
-    parser.add_argument('--robot-speed-max', type=float, default=6.0,
-                       help='机器人最大速度 (m/s)')
-    parser.add_argument('--sensor-interval', type=int, default=3,
-                       help='传感器触发间隔（每N步触发一次，模拟真实传感器延迟）')
-    parser.add_argument('--dt', type=float, default=0.05,
-                       help='仿真时间步长（秒），更小的值=更精细的模拟')
+    # 物理参数（可选覆盖配置）
+    parser.add_argument('--robot-speed-min', type=float, default=None,
+                       help='机器人最小速度 (m/s)，默认使用配置值')
+    parser.add_argument('--robot-speed-max', type=float, default=None,
+                       help='机器人最大速度 (m/s)，默认使用配置值')
+    parser.add_argument('--sensor-interval', type=int, default=None,
+                       help='传感器触发间隔（每N步触发一次），默认使用配置值')
+    parser.add_argument('--dt', type=float, default=None,
+                       help='仿真时间步长（秒），默认使用配置值')
 
     args = parser.parse_args()
     
-    print("\n🔧 物理参数配置:")
-    print(f"  机器人速度: {args.robot_speed_min} - {args.robot_speed_max} m/s")
-    print(f"  传感器触发间隔: 每{args.sensor_interval}步 ({args.sensor_interval * args.dt * 1000:.0f}ms)")
-    print(f"  仿真时间步长: {args.dt * 1000:.0f}ms")
-    print(f"  单次完整扫描时间: ~{args.sensor_interval * args.dt * 12:.2f}s (sequential模式)")
+    # 创建配置（使用默认数据收集配置，可通过参数覆盖）
+    robot_config = RobotPhysicsConfig()
+    
+    # 覆盖指定的参数
+    if args.robot_speed_min is not None:
+        robot_config.linear_velocity_min = args.robot_speed_min
+    if args.robot_speed_max is not None:
+        robot_config.linear_velocity_max = args.robot_speed_max
+    if args.sensor_interval is not None:
+        robot_config.sensor_trigger_interval = args.sensor_interval
+    if args.dt is not None:
+        robot_config.dt = args.dt
+    
+    config = SimulationConfig(robot=robot_config)
+    
+    # 打印配置信息
+    print_config(config, "数据收集配置")
 
     collector = GlobalMapDataCollector(
         data_dir=args.data_dir,
         sequence_length=args.sequence_length,
-        robot_speed_range=(args.robot_speed_min, args.robot_speed_max),
-        sensor_trigger_interval=args.sensor_interval,
-        dt=args.dt
+        config=config
     )
     collector.collect_dataset(args.episodes, args.max_steps)
 

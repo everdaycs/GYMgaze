@@ -25,6 +25,8 @@ fisher_analysis_plots/
 # 训练数据和模型（太大，不上传）
 *.pth
 *.pkl
+data/
+checkpoints/
 diffusion_training_data/
 global_map_training_data/
 training_data/

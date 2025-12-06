@@ -10,6 +10,8 @@ Ring Sonar Simulator - 环形超声波雷达模拟器
 """
 
 import numpy as np
+import os
+import sys
 import random
 import math
 import cv2
@@ -22,49 +24,39 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from fisher_utils import (
+# 添加项目根目录到路径
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+# 导入工具函数
+from src.utils.geometry import (
     clamp, angnorm_deg, angdiff_deg,
     add_global_feature
 )
-from sonar_fisher_calculator import SonarFisherCalculator
+from src.utils.fisher import SonarFisherCalculator
 
-# 导入训练好的时空Transformer模型
+# 导入配置
+from configs import (
+    SimulationConfig, RobotPhysicsConfig, SensorConfig, WorldConfig,
+    DEFAULT_CONFIG, DEMO_CONFIG, print_config
+)
+
+# 导入传感器定义
+from src.simulator.sensors import SonarSensor
+
+# 导入训练好的全局地图预测模型
 try:
-    from train_model import SpatioTemporalObstacleNet
+    from src.models.global_map import GlobalMapPredictor, ConvBlock
     MODEL_AVAILABLE = True
 except ImportError:
-    MODEL_AVAILABLE = False
-    print("Warning: Could not import SpatioTemporalObstacleNet model")
-
-
-# ------------------------------- 传感器定义 -------------------------------- #
-
-@dataclass
-class SonarSensor:
-    """单个超声波传感器的定义"""
-    id: int                      # 传感器编号 (0-11)
-    angle: float                 # 传感器相对机器人中心的角度 (degrees)
-    offset_x: float              # 相对机器人中心的x偏移 (meters)
-    offset_y: float              # 相对机器人中心的y偏移 (meters)
-    fov_angle: float             # 视野角度 (degrees)
-    max_range: float             # 最大探测距离 (meters)
-    
-    def get_world_position(self, robot_pos: np.ndarray, robot_angle: float) -> Tuple[float, float]:
-        """获取传感器在世界坐标系中的位置"""
-        # 考虑机器人旋转
-        angle_rad = math.radians(robot_angle)
-        cos_a = math.cos(angle_rad)
-        sin_a = math.sin(angle_rad)
-        
-        # 旋转偏移量
-        wx = robot_pos[0] + cos_a * self.offset_x - sin_a * self.offset_y
-        wy = robot_pos[1] + sin_a * self.offset_x + cos_a * self.offset_y
-        
-        return (wx, wy)
-    
-    def get_world_angle(self, robot_angle: float) -> float:
-        """获取传感器在世界坐标系中的朝向"""
-        return (robot_angle + self.angle) % 360.0
+    try:
+        # 兼容旧路径
+        from train_global_map_model import GlobalMapPredictor, ConvBlock
+        MODEL_AVAILABLE = True
+    except ImportError:
+        MODEL_AVAILABLE = False
+        print("Warning: Could not import GlobalMapPredictor model")
 
 
 # ------------------------------- 核心模拟器 -------------------------------- #
@@ -78,31 +70,37 @@ class RingSonarCore:
     """
     
     def __init__(self,
-                 world_width: float = 40.0,
-                 world_height: float = 40.0,
+                 world_width: float = None,
+                 world_height: float = None,
                  pixel_per_meter: int = 20,
-                 robot_size: float = 0.5,
-                 sensor_ring_radius: float = 0.15,  # 15cm
-                 num_sensors: int = 12,
-                 sensor_fov: float = 65.0,
-                 sensor_max_range: float = 12.5,
+                 robot_size: float = None,
+                 sensor_ring_radius: float = None,
+                 num_sensors: int = None,
+                 sensor_fov: float = None,
+                 sensor_max_range: float = None,
                  feature_map_size: int = 100,
                  feature_map_resolution: float = 0.25,
                  control_frequency: float = 5.0,
-                 trigger_mode: str = "sector",  # 触发模式
-                 dt: float = 0.1):  # 新增：仿真时间步长（秒）
+                 trigger_mode: str = "sequential",  # 触发模式
+                 dt: float = None,
+                 config: SimulationConfig = None):  # 新增：使用配置对象
         
-        # 世界参数
-        self.world_width = float(world_width)
-        self.world_height = float(world_height)
+        # 使用配置对象（如果提供）或使用默认配置
+        if config is None:
+            config = DEFAULT_CONFIG
+        self.config = config
+        
+        # 世界参数（配置优先，然后是参数，最后是默认值）
+        self.world_width = float(world_width if world_width is not None else config.world.world_width)
+        self.world_height = float(world_height if world_height is not None else config.world.world_height)
         self.pixel_per_meter = int(pixel_per_meter)
-        self.robot_size = float(robot_size)
+        self.robot_size = float(robot_size if robot_size is not None else config.robot.robot_size)
         
         # 传感器参数
-        self.sensor_ring_radius = float(sensor_ring_radius)
-        self.num_sensors = int(num_sensors)
-        self.sensor_fov = float(sensor_fov)
-        self.sensor_max_range = float(sensor_max_range)
+        self.sensor_ring_radius = float(sensor_ring_radius if sensor_ring_radius is not None else config.sensor.ring_radius)
+        self.num_sensors = int(num_sensors if num_sensors is not None else config.sensor.num_sensors)
+        self.sensor_fov = float(sensor_fov if sensor_fov is not None else config.sensor.fov_angle)
+        self.sensor_max_range = float(sensor_max_range if sensor_max_range is not None else config.sensor.max_range)
         
         # 触发模式配置
         self.trigger_mode = trigger_mode
@@ -119,8 +117,8 @@ class RingSonarCore:
         self.global_feature_map_size = int(max(self.world_width, self.world_height) * 2 / self.feature_map_resolution)
         self.global_feature_map = np.zeros((self.global_feature_map_size, self.global_feature_map_size), dtype=np.float32)
         
-        # 时间与控制
-        self.dt = float(dt)  # 仿真时间步长（可配置）
+        # 时间与控制（使用配置中的dt）
+        self.dt = float(dt if dt is not None else config.robot.dt)
         self.sim_time = 0.0
         
         # 机器人状态
@@ -129,8 +127,12 @@ class RingSonarCore:
         self._robot_angle_rad_cache = 0.0  # 缓存弧度值，避免重复转换
         self.velocity = 0.0              # m/s
         self.angular_velocity = 0.0      # rad/s
-        self.max_linear_velocity = 3.0
-        self.max_angular_velocity = 1.0
+        self.max_linear_velocity = config.robot.max_linear_velocity
+        self.max_angular_velocity = config.robot.max_angular_velocity
+        
+        # 传感器触发控制
+        self.sensor_trigger_interval = config.robot.sensor_trigger_interval
+        self.sensor_trigger_counter = 0
         
         # 传感器读数 (每个传感器的距离测量)
         self.sonar_readings = np.full(self.num_sensors, self.sensor_max_range, dtype=np.float32)
@@ -618,7 +620,7 @@ class RingSonarRenderer:
         # 预测置信度 (0-100: 置信度百分比)
         self.prediction_confidence = np.zeros((self.grid_height, self.grid_width), dtype=np.uint8)
         
-        # 时空Transformer模型相关
+        # 全局地图预测模型相关
         self.sequence_length = 5  # 与训练时保持一致
         self.model = None
         self.frame_buffer = []  # 存储历史帧用于时间序列
@@ -626,28 +628,30 @@ class RingSonarRenderer:
         
         # 只有在启用预测时才加载模型
         if self.enable_prediction:
+            # 全局地图预测模型配置
+            self.in_channels = 8  # 5帧局部观测 + 全局累积 + 访问计数 + 已知掩码
+            
             # 智能设备选择：优先GPU，如果GPU内存不足则回退到CPU
             if torch.cuda.is_available():
                 try:
-                    print("测试GPU内存是否足够进行时空Transformer推理...")
+                    print("测试GPU内存是否足够进行全局地图预测推理...")
                     torch.cuda.empty_cache()
                     
                     # 创建模型并尝试加载到GPU
-                    test_model = SpatioTemporalObstacleNet(
-                        in_channels=3, 
-                        base_channels=64, 
-                        sequence_length=self.sequence_length
+                    test_model = GlobalMapPredictor(
+                        in_channels=self.in_channels, 
+                        base_channels=32
                     ).cuda()
                     
                     # 加载权重
-                    checkpoint = torch.load('./obstacle_diffusion_model.pth', map_location='cuda')
+                    checkpoint = torch.load('./checkpoints/global_map_model.pth', map_location='cuda')
                     if 'model_state_dict' in checkpoint:
                         test_model.load_state_dict(checkpoint['model_state_dict'])
                     else:
                         test_model.load_state_dict(checkpoint)
                     
                     # 尝试一次完整的推理
-                    test_input = torch.randn(1, 5, 3, 400, 400).cuda()
+                    test_input = torch.randn(1, self.in_channels, 400, 400).cuda()
                     test_model.eval()
                     with torch.no_grad():
                         test_output = test_model(test_input)
@@ -657,10 +661,13 @@ class RingSonarRenderer:
                     torch.cuda.empty_cache()
                     
                     self.device = torch.device('cuda')
-                    print("✅ GPU内存充足，使用GPU进行时空Transformer推理")
+                    print("✅ GPU内存充足，使用GPU进行全局地图预测推理")
                 except RuntimeError as e:
                     print(f"❌ GPU内存不足: {e}，回退到CPU推理")
                     torch.cuda.empty_cache()
+                    self.device = torch.device('cpu')
+                except FileNotFoundError as e:
+                    print(f"⚠️ 模型文件未找到: {e}")
                     self.device = torch.device('cpu')
             else:
                 self.device = torch.device('cpu')
@@ -672,18 +679,24 @@ class RingSonarRenderer:
             print("📊 数据收集模式：已禁用障碍物预测以加速数据收集")
     
     def _load_model(self):
-        """加载训练好的时空Transformer模型"""
+        """加载训练好的全局地图预测模型"""
         if not MODEL_AVAILABLE:
-            print("时空Transformer模型不可用，将使用传统扩散预测")
+            print("全局地图预测模型不可用，将使用传统扩散预测")
             return
         
-        model_path = './obstacle_diffusion_model.pth'
+        model_path = './checkpoints/global_map_model.pth'
+        if not os.path.exists(model_path):
+            print(f"⚠️ 模型文件不存在: {model_path}")
+            print("请先运行 train_global_map_model.py 训练模型")
+            print("将使用传统扩散预测方法")
+            self.model = None
+            return
+            
         try:
             # 创建模型实例 - 使用与训练时相同的参数
-            self.model = SpatioTemporalObstacleNet(
-                in_channels=3, 
-                base_channels=64,  # 匹配训练时的默认参数
-                sequence_length=self.sequence_length
+            self.model = GlobalMapPredictor(
+                in_channels=self.in_channels, 
+                base_channels=32  # 匹配训练时的默认参数
             ).to(self.device)
             
             # 加载训练好的权重
@@ -697,7 +710,7 @@ class RingSonarRenderer:
             self.model = self.model.to(self.device)
             
             self.model.eval()
-            print(f"✅ 成功加载时空Transformer模型: {model_path}")
+            print(f"✅ 成功加载全局地图预测模型: {model_path}")
             print(f"   推理设备: {self.device}")
             print(f"   模型参数量: {sum(p.numel() for p in self.model.parameters()):,}")
             
@@ -973,7 +986,7 @@ class RingSonarRenderer:
     
     def _predict_obstacles(self):
         """
-        基于时空Transformer模型预测障碍物位置
+        基于全局地图预测模型预测障碍物位置
         
         如果模型可用，使用深度学习预测；否则使用传统扩散方法
         """
@@ -982,69 +995,76 @@ class RingSonarRenderer:
             return
             
         if self.model is not None and len(self.frame_buffer) >= self.sequence_length:
-            # 使用训练好的时空Transformer模型
+            # 使用训练好的全局地图预测模型
             self._predict_with_model()
         else:
             # 使用传统扩散预测方法
             self._predict_with_diffusion()
     
     def _predict_with_model(self):
-        """使用训练好的时空Transformer模型进行预测"""
+        """使用训练好的全局地图预测模型进行预测"""
         try:
             with torch.no_grad():
                 # 准备输入序列
                 sequence_frames = self.frame_buffer[-self.sequence_length:]
                 
-                # 构建输入张量 (T, 3, H, W)
-                occupancy_sequence = []
-                visit_count_sequence = []
-                known_mask_sequence = []
+                # 获取最后一帧的全局累积信息
+                last_frame = sequence_frames[-1]
                 
-                for frame in sequence_frames:
-                    # 归一化处理
-                    occupancy = frame['occupancy'].astype(np.float32) / 255.0
-                    visit_count = frame['visit_count'].astype(np.float32)
-                    visit_count = np.clip(visit_count / 100.0, 0, 1)  # 归一化
-                    
-                    # 已知/未知区域掩码
-                    known_mask = ((frame['occupancy'] < 80) | (frame['occupancy'] > 200)).astype(np.float32) / 255.0
-                    
-                    occupancy_sequence.append(occupancy)
-                    visit_count_sequence.append(visit_count)
-                    known_mask_sequence.append(known_mask)
+                # 构建时间序列输入 (T, H, W) - 局部观测序列
+                local_seq = np.stack([
+                    f['occupancy'].astype(np.float32) / 255.0 
+                    for f in sequence_frames
+                ], axis=0)  # (T, H, W)
                 
-                # 堆叠为 (T, H, W)
-                occupancy_seq = np.stack(occupancy_sequence, axis=0)
-                visit_count_seq = np.stack(visit_count_sequence, axis=0)
-                known_mask_seq = np.stack(known_mask_sequence, axis=0)
+                # 全局累积地图（使用当前的占用栅格作为全局累积）
+                global_acc = self.occupancy_grid.astype(np.float32) / 255.0  # (H, W)
                 
-                # 合并为 (T, 3, H, W)
-                input_sequence = np.stack([occupancy_seq, visit_count_seq, known_mask_seq], axis=1)
+                # 访问计数归一化
+                global_visit = np.clip(self.visit_count.astype(np.float32) / 100.0, 0, 1)  # (H, W)
                 
-                # 转换为PyTorch张量并添加批次维度
-                input_tensor = torch.FloatTensor(input_sequence).unsqueeze(0).to(self.device)
+                # 创建已知区域掩码 (H, W) - 非127的区域为已知
+                known_mask = (self.occupancy_grid != 127).astype(np.float32)
+                
+                # 组合输入 (T+3, H, W)
+                # - T帧局部观测
+                # - 1帧全局累积
+                # - 1帧访问计数
+                # - 1帧已知掩码
+                input_tensor = np.concatenate([
+                    local_seq,                          # (T, H, W)
+                    global_acc[np.newaxis, :, :],       # (1, H, W)
+                    global_visit[np.newaxis, :, :],     # (1, H, W)
+                    known_mask[np.newaxis, :, :]        # (1, H, W)
+                ], axis=0)  # (T+3, H, W)
+                
+                # 转换为PyTorch张量并添加批次维度 (1, C, H, W)
+                input_tensor = torch.FloatTensor(input_tensor).unsqueeze(0).to(self.device)
                 
                 # 模型推理
                 output = self.model(input_tensor)
                 
-                # 处理输出 (B, 1, H, W) -> (H, W)
-                prediction = output.squeeze(0).squeeze(0).cpu().numpy()
+                # 处理输出 (B, H, W) -> (H, W)
+                prediction = output.squeeze(0).cpu().numpy()
                 
-                # 转换为0-255范围
-                prediction = (prediction * 255).astype(np.uint8)
-                
-                # 模型已经输出完整分辨率，无需上采样
-                prediction_resized = prediction
+                # 转换为0-255范围（模型输出0=空闲，1=障碍物）
+                # 转换为占用栅格格式：0=障碍物，255=空闲，127=未知
+                prediction_occupancy = np.zeros_like(prediction, dtype=np.uint8)
+                prediction_occupancy[prediction < 0.3] = 255  # 高可信度空闲
+                prediction_occupancy[prediction > 0.7] = 0    # 高可信度障碍物
+                prediction_occupancy[(prediction >= 0.3) & (prediction <= 0.7)] = 127  # 不确定区域
                 
                 # 更新预测地图
-                self.obstacle_prediction = prediction_resized
+                self.obstacle_prediction = prediction_occupancy
                 
-                # 计算置信度（基于预测概率的方差或梯度）
-                confidence = np.abs(prediction_resized.astype(np.float32) - 127.5) / 127.5 * 100
+                # 计算置信度（离0.5越远置信度越高）
+                confidence = np.abs(prediction - 0.5) * 200  # 0-100
                 self.prediction_confidence = confidence.astype(np.uint8)
                 
         except Exception as e:
             print(f"模型预测失败: {e}，切换到传统方法")
+            import traceback
+            traceback.print_exc()
             self._predict_with_diffusion()
     
     def _predict_with_diffusion(self):
@@ -1270,7 +1290,7 @@ class RingSonarRenderer:
         high_conf_predictions = np.sum(self.prediction_confidence > 70)
         
         # 添加标题和统计信息
-        model_type = "Spatio-Temporal Transformer" if self.model is not None and len(self.frame_buffer) >= self.sequence_length else "Diffusion Model"
+        model_type = "Global Map Predictor" if self.model is not None and len(self.frame_buffer) >= self.sequence_length else "Diffusion Model"
         cv2.putText(pred_display, f"Obstacle Prediction ({model_type})", (10, 25),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
@@ -1319,31 +1339,56 @@ if __name__ == "__main__":
                             '  sector=扇区轮询(可能有干扰)\n'
                             '  all=全部触发(高干扰)')
     parser.add_argument('--demo-mode', action='store_true', 
-                       help='演示模式：对比时空Transformer vs 传统扩散预测')
+                       help='演示模式：使用较慢的速度便于观察')
+    parser.add_argument('--use-default-config', action='store_true',
+                       help='使用与训练数据相同的默认配置（推荐用于推理）')
     args = parser.parse_args()
     
+    # 选择配置
+    if args.demo_mode:
+        config = DEMO_CONFIG
+        config_name = "演示配置 (DEMO_CONFIG)"
+    elif args.use_default_config:
+        config = DEFAULT_CONFIG
+        config_name = "默认配置 (DEFAULT_CONFIG)"
+    else:
+        # 创建自定义配置
+        config = SimulationConfig(
+            robot=RobotPhysicsConfig(
+                dt=0.05 / args.speed,  # 基于速度倍率调整
+                sensor_trigger_interval=1  # 交互模式下每步触发
+            ),
+            world=WorldConfig(
+                world_width=args.world_size,
+                world_height=args.world_size
+            )
+        )
+        config_name = "自定义配置"
+    
     print("启动环形超声波雷达模拟器...")
+    print_config(config, config_name)
     print(f"  - 无界面模式: {args.headless}")
     print(f"  - 实时模式: {args.realtime}")
     print(f"  - 速度倍率: {args.speed}x")
     print(f"  - 触发模式: {args.trigger_mode}")
     print(f"  - 仿真步数: {args.steps}")
-    print(f"  - 世界大小: {args.world_size}m x {args.world_size}m")
-    print(f"  - 演示模式: {args.demo_mode}")
     
     if args.demo_mode:
         print("\n" + "="*60)
-        print("🚀 时空Transformer障碍物预测演示")
+        print("🚀 全局地图预测模型演示")
         print("="*60)
-        print("该演示将展示时空Transformer模型如何利用时间序列")
-        print("信息进行更准确的障碍物预测")
+        print("该演示将展示全局地图预测模型如何利用时间序列")
+        print("信息进行SLAM风格的全局地图重建和障碍物预测")
         print("按 'q' 或 ESC 退出演示")
         print("="*60)
     
-    # 根据速度倍率调整时间步长
-    dt = 0.1 / args.speed
-    core = RingSonarCore(world_width=args.world_size, world_height=args.world_size, 
-                         dt=dt, trigger_mode=args.trigger_mode)
+    # 创建核心模拟器（使用配置）
+    core = RingSonarCore(
+        world_width=args.world_size, 
+        world_height=args.world_size, 
+        trigger_mode=args.trigger_mode,
+        config=config
+    )
     core.reset(regenerate_map=True)
     
     if not args.headless:
@@ -1354,18 +1399,22 @@ if __name__ == "__main__":
     init = core.state()
     print(f"机器人初始位置: [{init['position'][0]:.2f}, {init['position'][1]:.2f}] m")
     print(f"传感器数量: {core.num_sensors}, 环半径: {core.sensor_ring_radius}m")
+    print(f"时间步长: {core.dt}s, 传感器触发间隔: {core.sensor_trigger_interval}步")
     
     start_real = time.time()
     expected_sim_t = 0.0
     
+    # 速度变化计数器
+    velocity_change_counter = 0
+    
     try:
         for step in range(args.steps):
-            # 简单的随机移动策略
-            if step % 50 == 0:
-                core.set_velocity(
-                    float(np.random.uniform(-2.0, 3.0)),
-                    float(np.random.uniform(-0.8, 0.8))
-                )
+            # 使用配置中的速度变化间隔和随机速度
+            velocity_change_counter += 1
+            if velocity_change_counter >= config.robot.velocity_change_interval:
+                velocity_change_counter = 0
+                linear_vel, angular_vel = config.robot.get_random_velocity()
+                core.set_velocity(linear_vel, angular_vel)
             
             core.step()
             core.update_maps()
