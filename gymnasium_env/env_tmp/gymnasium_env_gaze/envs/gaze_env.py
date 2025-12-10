@@ -10,7 +10,7 @@ import os
 
 # 添加父目录到路径以导入fisher_utils
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../../')))
-from fisher_utils import compute_fisher_nb, add_global_feature_3d_nb, clamp, angnorm_deg, angdiff_deg
+from backup.fisher_utils import compute_fisher_nb, add_global_feature_3d_nb, clamp, angnorm_deg, angdiff_deg
 
 class GazeEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array", "bird"]}

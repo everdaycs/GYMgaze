@@ -42,8 +42,15 @@ from configs import (
     DEFAULT_CONFIG, DEMO_CONFIG, print_config
 )
 
-# 导入传感器定义
+# 导入传感器和触发器
 from src.simulator.sensors import SonarSensor
+from src.simulator.trigger import (
+    TriggerManager, TriggerMode, TriggerConfig,
+    DEFAULT_TRIGGER_CONFIG, DATA_COLLECTION_TRIGGER_CONFIG
+)
+
+# 导入多样化地图生成器
+from src.simulator.map_generator import DiverseMapGenerator
 
 # 导入训练好的全局地图预测模型
 try:
@@ -82,6 +89,7 @@ class RingSonarCore:
                  feature_map_resolution: float = 0.25,
                  control_frequency: float = 5.0,
                  trigger_mode: str = "sequential",  # 触发模式
+                 randomize_trigger: bool = False,   # 是否随机选择触发模式
                  dt: float = None,
                  config: SimulationConfig = None):  # 新增：使用配置对象
         
@@ -101,10 +109,6 @@ class RingSonarCore:
         self.num_sensors = int(num_sensors if num_sensors is not None else config.sensor.num_sensors)
         self.sensor_fov = float(sensor_fov if sensor_fov is not None else config.sensor.fov_angle)
         self.sensor_max_range = float(sensor_max_range if sensor_max_range is not None else config.sensor.max_range)
-        
-        # 触发模式配置
-        self.trigger_mode = trigger_mode
-        self._init_trigger_config()
         
         # 初始化传感器阵列
         self.sensors: List[SonarSensor] = []
@@ -130,12 +134,17 @@ class RingSonarCore:
         self.max_linear_velocity = config.robot.max_linear_velocity
         self.max_angular_velocity = config.robot.max_angular_velocity
         
-        # 传感器触发控制
-        self.sensor_trigger_interval = config.robot.sensor_trigger_interval
-        self.sensor_trigger_counter = 0
+        # 传感器触发控制 - 控制何时实际扫描传感器
+        self.sensor_trigger_interval = max(1, int(config.robot.sensor_trigger_interval))
+        self.sensor_trigger_counter = 0  # 计数器，当达到interval时触发扫描
         
         # 传感器读数 (每个传感器的距离测量)
         self.sonar_readings = np.full(self.num_sensors, self.sensor_max_range, dtype=np.float32)
+        
+        # 触发管理器（使用新的TriggerManager）
+        # 注意：必须在sonar_readings初始化之后调用，因为greedy模式会使用它
+        self.randomize_trigger = randomize_trigger
+        self._init_trigger_manager(trigger_mode, randomize_trigger)
         
         # 跟踪本帧哪些传感器被扫描过（用于occupancy grid更新）
         self.active_sensors_this_frame = set()
@@ -160,49 +169,64 @@ class RingSonarCore:
             sensor_fov=self.sensor_fov,
             max_range=self.sensor_max_range
         )
+        
+        # 多样化地图生成器
+        self.map_generator = DiverseMapGenerator(
+            world_width=self.world_width,
+            world_height=self.world_height
+        )
+        self._map_seed = 0  # 当前地图种子
+        self._current_scene_type = None  # 当前场景类型
     
-    # -------- 触发模式配置 -------- #
+    # -------- 触发管理器 -------- #
     
-    def _init_trigger_config(self):
-        """初始化触发配置"""
-        if self.trigger_mode == "sector":
-            # 扇区轮询模式：分4个扇区，每个扇区3个传感器
-            # 传感器ID: 0(0°), 1(30°), 2(60°), 3(90°), ..., 11(330°)
-            self.sectors = {
-                "front": [11, 0, 1],      # 330°, 0°, 30° (机器人前方±30°)
-                "right": [2, 3, 4],       # 60°, 90°, 120° (右侧)
-                "back": [5, 6, 7],        # 150°, 180°, 210° (后方)
-                "left": [8, 9, 10]        # 240°, 270°, 300° (左侧)
-            }
-            self.sector_sequence = ["front", "right", "back", "left"]
-            self.current_sector_index = 0
-            
-            print(f"触发模式: {self.trigger_mode}")
-            print(f"扇区配置: {self.sectors}")
-            print(f"轮询顺序: {self.sector_sequence}")
-            
-        elif self.trigger_mode == "sequential":
-            # 顺序扫描模式：每次只触发1个传感器，完全避免干扰
-            self.current_sensor_index = 0
-            print(f"触发模式: {self.trigger_mode} (顺序扫描，完全避免干扰)")
-            print(f"扫描顺序: 0 → 1 → 2 → ... → 11 → 0")
-            
-        elif self.trigger_mode == "interleaved":
-            # 交错扫描模式：传感器间隔足够大，避免干扰
-            # 奇数轮次：0, 2, 4, 6, 8, 10 (间隔60°)
-            # 偶数轮次：1, 3, 5, 7, 9, 11 (间隔60°)
-            self.interleaved_groups = [
-                [0, 2, 4, 6, 8, 10],  # 偶数ID，间隔60°
-                [1, 3, 5, 7, 9, 11]   # 奇数ID，间隔60°
-            ]
-            self.current_group_index = 0
-            self.current_sensor_in_group = 0
-            print(f"触发模式: {self.trigger_mode} (交错扫描)")
-            print(f"组1: {self.interleaved_groups[0]} (间隔60°)")
-            print(f"组2: {self.interleaved_groups[1]} (间隔60°)")
+    def _init_trigger_manager(self, trigger_mode: str, randomize: bool):
+        """初始化触发管理器"""
+        # 选择触发配置
+        if randomize:
+            trigger_config = DATA_COLLECTION_TRIGGER_CONFIG
         else:
-            # all 或其他模式
-            print(f"触发模式: {self.trigger_mode}")
+            trigger_config = DEFAULT_TRIGGER_CONFIG
+        
+        # 创建触发管理器
+        initial_mode = TriggerMode.from_string(trigger_mode) if not randomize else None
+        self.trigger_manager = TriggerManager(
+            num_sensors=self.num_sensors if hasattr(self, 'num_sensors') else 12,
+            config=trigger_config,
+            initial_mode=initial_mode
+        )
+        
+        # 注册贪心策略回调
+        self.trigger_manager.set_greedy_callback(self._greedy_trigger_strategy)
+        
+        # 如果需要随机化，立即随机选择模式
+        if randomize:
+            self.trigger_manager.set_random_mode()
+        
+        # 保持向后兼容的trigger_mode属性
+        self.trigger_mode = str(self.trigger_manager.mode)
+        
+        # 打印触发信息
+        info = self.trigger_manager.get_mode_info()
+        print(f"触发模式: {info['mode']} ({info['description']})")
+        if randomize:
+            print("  (随机选择模式已启用)")
+    
+    @property
+    def current_trigger_mode(self) -> TriggerMode:
+        """当前触发模式"""
+        return self.trigger_manager.mode
+    
+    def set_trigger_mode(self, mode: str) -> None:
+        """设置触发模式"""
+        self.trigger_manager.set_mode_from_string(mode)
+        self.trigger_mode = str(self.trigger_manager.mode)
+    
+    def randomize_trigger_mode(self) -> str:
+        """随机选择触发模式"""
+        mode = self.trigger_manager.set_random_mode()
+        self.trigger_mode = str(mode)
+        return self.trigger_mode
     
     # -------- 传感器初始化 -------- #
     
@@ -233,14 +257,27 @@ class RingSonarCore:
     
     # -------- 公共API -------- #
     
-    def reset(self, regenerate_map: bool = True, seed: Optional[int] = None) -> None:
-        """重置环境"""
+    def reset(self, regenerate_map: bool = True, seed: Optional[int] = None, 
+              scene_type: Optional[str] = None) -> None:
+        """
+        重置环境
+        
+        参数:
+            regenerate_map: 是否重新生成地图
+            seed: 随机种子（None则使用随机种子）
+            scene_type: 指定场景类型（None则随机选择）
+                可选值: 'sparse', 'dense', 'clustered', 'corridor', 
+                       'rooms', 'mixed', 'maze_like', 'open_center'
+        """
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
+            self._map_seed = seed
+        else:
+            self._map_seed = random.randint(0, 1000000)
         
         if regenerate_map or not self._have_map:
-            self._gen_obstacles(num_obstacles=20)
+            self._gen_obstacles(scene_type=scene_type)
             self._have_map = True
         
         self.robot_pos = self._find_safe_start()
@@ -255,6 +292,7 @@ class RingSonarCore:
         self.feature_map.fill(0.0)
         self.global_feature_map.fill(0.0)
         self.sonar_readings.fill(self.sensor_max_range)
+        self.sensor_trigger_counter = 0  # 重置触发计数器
         
         self._collision_occurred = False
         self._stuck_counter = 0
@@ -284,8 +322,16 @@ class RingSonarCore:
         else:
             self._stuck_counter = 0
         
-        # 扫描所有传感器
-        self._scan_all_sensors()
+        # 更新传感器触发计数器
+        self.sensor_trigger_counter += 1
+        
+        # 清空本帧活跃传感器记录（在开始时清空）
+        self.active_sensors_this_frame.clear()
+        
+        # 只在触发间隔时刻扫描传感器
+        if self.sensor_trigger_counter >= self.sensor_trigger_interval:
+            self._scan_all_sensors()
+            self.sensor_trigger_counter = 0
         
         self.step_counter += 1
     
@@ -327,26 +373,25 @@ class RingSonarCore:
         """检查点是否在世界范围内"""
         return 0.0 <= x < self.world_width and 0.0 <= y < self.world_height
     
-    def _gen_obstacles(self, num_obstacles: int = 20):
-        """生成障碍物"""
+    def _gen_obstacles(self, scene_type: Optional[str] = None):
+        """
+        生成障碍物（使用多样化地图生成器）
+        
+        参数:
+            scene_type: 场景类型，None则随机选择
+        """
         self.obstacles.clear()
-        wall = 0.5
         
-        # 边界墙
-        self.obstacles += [
-            ('rect', (0.0, 0.0, self.world_width, wall)),
-            ('rect', (0.0, self.world_height - wall, self.world_width, wall)),
-            ('rect', (0.0, 0.0, wall, self.world_height)),
-            ('rect', (self.world_width - wall, 0.0, wall, self.world_height))
-        ]
+        # 使用 DiverseMapGenerator 生成障碍物
+        self.obstacles = self.map_generator.generate_obstacles(
+            seed=self._map_seed,
+            scene_type=scene_type
+        )
         
-        # 随机障碍物
-        for _ in range(num_obstacles):
-            x = random.uniform(2.5, self.world_width - 2.5)
-            y = random.uniform(2.5, self.world_height - 2.5)
-            w = random.uniform(2.0, 5.0)
-            h = random.uniform(2.0, 5.0)
-            self.obstacles.append(('rect', (x, y, w, h)))
+        # 记录当前场景类型
+        self._current_scene_type = self.map_generator.get_scene_type_from_seed(self._map_seed) if scene_type is None else scene_type
+        
+        print(f"🗺️  生成地图: {self._current_scene_type} (seed={self._map_seed}, 障碍物数={len(self.obstacles)})")
     
     def _find_safe_start(self) -> np.ndarray:
         """寻找安全的起始位置"""
@@ -425,24 +470,12 @@ class RingSonarCore:
     
     def _get_active_sensor_ids(self) -> List[int]:
         """获取当前帧应激活的传感器ID列表"""
-        if self.trigger_mode == "sector":
-            current_sector_name = self.sector_sequence[self.current_sector_index]
-            return self.sectors[current_sector_name]
-        elif self.trigger_mode == "sequential":
-            return [self.current_sensor_index]
-        elif self.trigger_mode == "interleaved":
-            current_group = self.interleaved_groups[self.current_group_index]
-            return [current_group[self.current_sensor_in_group]]
-        else:  # "all"
-            return list(range(self.num_sensors))
+        return self.trigger_manager.get_active_sensors()
     
     def _scan_all_sensors(self):
         """扫描传感器（根据触发模式）"""
-        # 清空本帧活跃传感器记录
-        self.active_sensors_this_frame.clear()
-        
-        # 获取需要激活的传感器ID
-        active_ids = self._get_active_sensor_ids()
+        # 获取需要激活的传感器ID（使用TriggerManager）
+        active_ids = self.trigger_manager.get_active_sensors()
         
         # 扫描激活的传感器
         for sensor_id in active_ids:
@@ -451,16 +484,8 @@ class RingSonarCore:
             self.sonar_readings[sensor_id] = distance
             self.active_sensors_this_frame.add(sensor_id)
         
-        # 更新触发模式的索引
-        if self.trigger_mode == "sector":
-            self.current_sector_index = (self.current_sector_index + 1) % len(self.sector_sequence)
-        elif self.trigger_mode == "sequential":
-            self.current_sensor_index = (self.current_sensor_index + 1) % self.num_sensors
-        elif self.trigger_mode == "interleaved":
-            self.current_sensor_in_group += 1
-            if self.current_sensor_in_group >= len(self.interleaved_groups[self.current_group_index]):
-                self.current_sensor_in_group = 0
-                self.current_group_index = (self.current_group_index + 1) % len(self.interleaved_groups)
+        # 前进到下一个触发状态
+        self.trigger_manager.advance()
     
     def _scan_single_sensor(self, sensor: SonarSensor) -> float:
         """扫描单个传感器，返回最近障碍物距离"""
@@ -507,8 +532,10 @@ class RingSonarCore:
         self.global_feature_map[self.global_feature_map < 0.1] = 0.0
     
     def _detect_and_add_features_to_global_map(self):
-        """从传感器读数中检测并添加特征到全局地图"""
-        for sensor in self.sensors:
+        """从传感器读数中检测并添加特征到全局地图 - 仅处理本帧扫描过的传感器"""
+        # 只处理在本帧实际被扫描过的传感器，避免使用旧数据
+        for sensor_id in self.active_sensors_this_frame:
+            sensor = self.sensors[sensor_id]
             distance = self.sonar_readings[sensor.id]
             
             # 如果检测到障碍物（距离小于最大范围）
@@ -588,6 +615,64 @@ class RingSonarCore:
         
         # 轻微模糊
         self.feature_map = cv2.GaussianBlur(self.feature_map, (3, 3), 0.5)
+    
+    def _greedy_trigger_strategy(self) -> List[int]:
+        """
+        贪心触发策略：优先扫描已知障碍物但Fisher信息较低的区域
+        """
+        candidates = []
+        
+        # 1. 找出所有最近探测到障碍物的传感器
+        for i, reading in enumerate(self.sonar_readings):
+            if reading < self.sensor_max_range * 0.95:
+                candidates.append(i)
+        
+        # 2. 如果没有发现障碍物，随机选择一个
+        if not candidates:
+            return [random.randint(0, self.num_sensors - 1)]
+            
+        # 3. 评估每个候选传感器的"信息需求"
+        best_sensor_id = candidates[0]
+        min_fisher_val = float('inf')
+        
+        # 随机打乱候选者，避免平局时的偏好
+        random.shuffle(candidates)
+        
+        for sensor_id in candidates:
+            sensor = self.sensors[sensor_id]
+            dist = self.sonar_readings[sensor_id]
+            
+            # 计算障碍物位置估计
+            sensor_pos = sensor.get_world_position(self.robot_pos, self.robot_angle)
+            sensor_angle = sensor.get_world_angle(self.robot_angle)
+            angle_rad = math.radians(sensor_angle)
+            
+            wx = sensor_pos[0] + math.cos(angle_rad) * dist
+            wy = sensor_pos[1] + math.sin(angle_rad) * dist
+            
+            # 转换为地图坐标
+            res = self.feature_map_resolution
+            ms = self.global_feature_map_size
+            ww = self.world_width
+            wh = self.world_height
+            
+            gx = int(wx / res + ms // 2 - ww // (2 * res))
+            gy = int(wy / res + ms // 2 - wh // (2 * res))
+            
+            val = 0.0
+            if 0 <= gx < ms and 0 <= gy < ms:
+                val = self.global_feature_map[gy, gx]
+            
+            # 选择Fisher信息最低（最不确定）的目标
+            if val < min_fisher_val:
+                min_fisher_val = val
+                best_sensor_id = sensor_id
+        
+        # 4. 20%概率随机探索，避免陷入局部最优
+        if random.random() < 0.2:
+            return [random.randint(0, self.num_sensors - 1)]
+            
+        return [best_sensor_id]
 
 
 # ------------------------------- 渲染器 -------------------------------- #
@@ -676,7 +761,7 @@ class RingSonarRenderer:
             # 尝试加载训练好的模型
             self._load_model()
         else:
-            print("📊 数据收集模式：已禁用障碍物预测以加速数据收集")
+            print("📊 数据收集")
     
     def _load_model(self):
         """加载训练好的全局地图预测模型"""
@@ -729,7 +814,10 @@ class RingSonarRenderer:
         self._draw_robot()
         self._draw_sensor_readings()
         self._draw_trigger_info()  # 显示触发模式信息
-        self._update_occupancy_grid()
+        
+        # 仅在有新扫描数据时更新占用栅格
+        if len(self.core.active_sensors_this_frame) > 0:
+            self._update_occupancy_grid()
         
         if self.render_mode == "human":
             self._show_windows()
@@ -847,10 +935,12 @@ class RingSonarRenderer:
         cv2.addWeighted(self.world_img, 0.7, overlay, 0.3, 0, self.world_img)
     
     def _draw_sensor_readings(self):
-        """在图像上绘制传感器读数文本"""
+        """在图像上绘制传感器读数文本 - 仅显示本帧实际扫描的传感器"""
         ppm = self.core.pixel_per_meter
         
-        for i, sensor in enumerate(self.core.sensors):
+        # 只显示本帧实际扫描过的传感器读数
+        for sensor_id in self.core.active_sensors_this_frame:
+            sensor = self.core.sensors[sensor_id]
             sx, sy = sensor.get_world_position(self.core.robot_pos, self.core.robot_angle)
             sx_pix, sy_pix = self._w2p(sx, sy)
             
@@ -1246,22 +1336,62 @@ class RingSonarRenderer:
         self._show_obstacle_prediction()
     
     def _show_obstacle_prediction(self):
-        """显示障碍物预测地图"""
-        # 创建热力图：0=无障碍(蓝), 127=未知(绿), 255=障碍(红)
-        prediction_colored = cv2.applyColorMap(self.obstacle_prediction, cv2.COLORMAP_JET)
+        """显示障碍物预测地图
+        
+        显示说明：
+        - 绿色区域：已探索的空闲区域（机器人已确认可通过）
+        - 红色区域：已探索的障碍物区域（机器人已确认有障碍）
+        - 热力图颜色（蓝→绿→红）：未知区域的预测
+          * 蓝色 = 预测为空闲的可能性高
+          * 红色 = 预测为有障碍物的可能性高
+          * 绿色 = 预测不确定
+        """
+        # ============ 修复：正确的颜色映射 ============
+        # obstacle_prediction 的值：
+        #   0 = 障碍物（模型输出高值，然后被反转）
+        #   127 = 未知
+        #   255 = 空闲
+        # 
+        # 我们希望：红色=障碍物，蓝色=空闲
+        # 所以需要反转值再应用热力图
+        prediction_inverted = 255 - self.obstacle_prediction  # 反转：障碍物变高值(红)，空闲变低值(蓝)
+        prediction_colored = cv2.applyColorMap(prediction_inverted, cv2.COLORMAP_JET)
         
         # 叠加置信度（透明度）
         # 高置信度区域更不透明
         confidence_alpha = (self.prediction_confidence / 100.0 * 0.8 + 0.2)  # 0.2-1.0
         
-        # 在预测图上标记已知信息
-        # 已知空闲：绿色边框
-        free_mask = (self.occupancy_grid > 200)
-        prediction_colored[free_mask] = [0, 255, 0]  # 绿色
+        # 创建已知/未知掩码
+        # 已知区域 = occupancy_grid 有明确值（<80 或 >200）
+        # 未知区域 = occupancy_grid 在 80-200 之间（没有确定信息）
+        known_free_mask = (self.occupancy_grid > 200)      # 已知空闲区域
+        known_obstacle_mask = (self.occupancy_grid < 80)   # 已知障碍区域
+        unknown_mask = (~known_free_mask) & (~known_obstacle_mask)  # 未知区域
         
-        # 已知障碍：红色边框
-        obstacle_mask = (self.occupancy_grid < 80)
-        prediction_colored[obstacle_mask] = [0, 0, 255]  # 红色
+        # ============ 关键修改：清晰区分已知和未知区域 ============
+        # 1. 已知区域显示实际的occupancy_grid信息（用户已经知道）
+        #    这些区域不显示模型的预测，因为已经有真实信息
+        
+        # 已知空闲：绿色（明确的通过区域）
+        prediction_colored[known_free_mask] = [0, 255, 0]
+        
+        # 已知障碍：红色（明确的障碍物）
+        prediction_colored[known_obstacle_mask] = [0, 0, 255]
+        
+        # 2. 未知区域保持热力图颜色
+        #    这样可以看到模型的预测：
+        #    - 蓝色热力 = 预测为空闲
+        #    - 红色热力 = 预测为障碍
+        #    热力图在未知区域已经正确保留，无需额外处理
+        
+        # 3. 添加未知区域的边界线（更清晰地区分）
+        # 创建未知区域的轮廓
+        unknown_uint8 = unknown_mask.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(unknown_uint8, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 在未知区域边界绘制白色边框（强调区分）
+        if len(contours) > 0:
+            cv2.drawContours(prediction_colored, contours, -1, (255, 255, 255), 1)
         
         # 标记机器人位置
         robot_gx = int(self.core.robot_pos[0] / self.grid_resolution)
@@ -1283,10 +1413,18 @@ class RingSonarRenderer:
                                   interpolation=cv2.INTER_NEAREST)
         
         # 计算统计信息
-        predicted_obstacles = np.sum((self.obstacle_prediction > 180) & 
-                                     (self.occupancy_grid > 100) & 
-                                     (self.occupancy_grid < 200))
-        avg_confidence = np.mean(self.prediction_confidence[self.prediction_confidence > 0])
+        # 已知区域统计
+        known_free_count = np.sum(known_free_mask)
+        known_obstacle_count = np.sum(known_obstacle_mask)
+        unknown_count = np.sum(unknown_mask)
+        
+        # 预测统计（仅在未知区域）
+        predicted_obstacles_in_unknown = np.sum((self.obstacle_prediction > 180) & unknown_mask)
+        predicted_free_in_unknown = np.sum((self.obstacle_prediction < 80) & unknown_mask)
+        
+        # 平均置信度（仅在有预测的区域）
+        valid_predictions = self.prediction_confidence[self.prediction_confidence > 0]
+        avg_confidence = np.mean(valid_predictions) if len(valid_predictions) > 0 else 0
         high_conf_predictions = np.sum(self.prediction_confidence > 70)
         
         # 添加标题和统计信息
@@ -1294,29 +1432,47 @@ class RingSonarRenderer:
         cv2.putText(pred_display, f"Obstacle Prediction ({model_type})", (10, 25),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
+        # 显示已知/未知统计
+        y_offset = 50
+        cv2.putText(pred_display, f"[KNOWN] Free: {known_free_count} | Obstacle: {known_obstacle_count}", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        y_offset += 20
+        cv2.putText(pred_display, f"[UNKNOWN] Total: {unknown_count}", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        y_offset += 20
+        
         # 显示帧缓冲状态
         if self.model is not None:
             buffer_status = f"Buffer: {len(self.frame_buffer)}/{self.sequence_length}"
-            cv2.putText(pred_display, buffer_status, (10, 50),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        cv2.putText(pred_display, f"Predicted Obstacles: {predicted_obstacles}", (10, 50),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        cv2.putText(pred_display, f"Avg Confidence: {avg_confidence:.1f}%", (10, 70),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        cv2.putText(pred_display, f"High Conf Cells: {high_conf_predictions}", (10, 90),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            cv2.putText(pred_display, buffer_status, (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+            y_offset += 20
+        
+        # 显示预测统计（仅在未知区域）
+        cv2.putText(pred_display, f"[PRED in UNKNOWN] Obstacle: {predicted_obstacles_in_unknown} | Free: {predicted_free_in_unknown}", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 200, 100), 1)
+        y_offset += 20
+        cv2.putText(pred_display, f"Avg Confidence: {avg_confidence:.1f}% | High Conf: {high_conf_predictions}", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 200, 100), 1)
         
         # 图例
-        legend_y = pred_display.shape[0] - 60
+        legend_y = pred_display.shape[0] - 80
         cv2.putText(pred_display, "Legend:", (10, legend_y),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        cv2.rectangle(pred_display, (10, legend_y + 5), (30, legend_y + 15), (0, 255, 0), -1)
-        cv2.putText(pred_display, "= Known Free", (35, legend_y + 15),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2)
+        
+        # 已知区域说明
+        cv2.rectangle(pred_display, (10, legend_y + 15), (30, legend_y + 25), (0, 255, 0), -1)
+        cv2.putText(pred_display, "= Known Free (Explored)", (35, legend_y + 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
+        
+        cv2.rectangle(pred_display, (10, legend_y + 30), (30, legend_y + 40), (0, 0, 255), -1)
+        cv2.putText(pred_display, "= Known Obstacle (Explored)", (35, legend_y + 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+        
+        # 预测颜色说明
+        cv2.putText(pred_display, "Heatmap (in Unknown Area):", (10, legend_y + 55),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-        cv2.rectangle(pred_display, (10, legend_y + 20), (30, legend_y + 30), (0, 0, 255), -1)
-        cv2.putText(pred_display, "= Known Obstacle", (35, legend_y + 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-        cv2.putText(pred_display, "Blue->Red = Predicted Probability", (10, legend_y + 45),
+        cv2.putText(pred_display, "Blue = Predicted Free  |  Red = Predicted Obstacle", (10, legend_y + 70),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         
         cv2.imshow("Obstacle Prediction", pred_display)
@@ -1332,12 +1488,15 @@ if __name__ == "__main__":
     parser.add_argument('--world-size', type=float, default=40.0, help='世界大小(米)')
     parser.add_argument('--speed', type=float, default=1.0, help='速度倍率 (0.5=慢一倍, 2.0=快一倍)')
     parser.add_argument('--trigger-mode', type=str, default='sequential', 
-                       choices=['sequential', 'interleaved', 'sector', 'all'], 
+                       choices=['sequential', 'interleaved', 'sector', 'all', 'greedy'], 
                        help='传感器触发模式:\n'
                             '  sequential=顺序扫描(推荐,无干扰)\n'
                             '  interleaved=交错扫描(60°间隔,低干扰)\n'
                             '  sector=扇区轮询(可能有干扰)\n'
-                            '  all=全部触发(高干扰)')
+                            '  all=全部触发(高干扰)\n'
+                            '  greedy=贪心策略(基于信息增益)')
+    parser.add_argument('--random-trigger', action='store_true',
+                       help='随机选择触发模式（用于数据收集）')
     parser.add_argument('--demo-mode', action='store_true', 
                        help='演示模式：使用较慢的速度便于观察')
     parser.add_argument('--use-default-config', action='store_true',
@@ -1352,11 +1511,11 @@ if __name__ == "__main__":
         config = DEFAULT_CONFIG
         config_name = "默认配置 (DEFAULT_CONFIG)"
     else:
-        # 创建自定义配置
+        # 创建自定义配置 - 从DEFAULT_CONFIG复制基础配置，然后根据命令行参数调整
         config = SimulationConfig(
             robot=RobotPhysicsConfig(
                 dt=0.05 / args.speed,  # 基于速度倍率调整
-                sensor_trigger_interval=1  # 交互模式下每步触发
+                sensor_trigger_interval=DEFAULT_CONFIG.robot.sensor_trigger_interval  # 使用配置文件的值
             ),
             world=WorldConfig(
                 world_width=args.world_size,
@@ -1370,7 +1529,7 @@ if __name__ == "__main__":
     print(f"  - 无界面模式: {args.headless}")
     print(f"  - 实时模式: {args.realtime}")
     print(f"  - 速度倍率: {args.speed}x")
-    print(f"  - 触发模式: {args.trigger_mode}")
+    print(f"  - 触发模式: {args.trigger_mode}" + (" (随机)" if args.random_trigger else ""))
     print(f"  - 仿真步数: {args.steps}")
     
     if args.demo_mode:
@@ -1382,11 +1541,12 @@ if __name__ == "__main__":
         print("按 'q' 或 ESC 退出演示")
         print("="*60)
     
-    # 创建核心模拟器（使用配置）
+    # 创建核心模拟器（使用配置和触发管理器）
     core = RingSonarCore(
         world_width=args.world_size, 
         world_height=args.world_size, 
         trigger_mode=args.trigger_mode,
+        randomize_trigger=args.random_trigger,
         config=config
     )
     core.reset(regenerate_map=True)
@@ -1402,8 +1562,7 @@ if __name__ == "__main__":
     print(f"时间步长: {core.dt}s, 传感器触发间隔: {core.sensor_trigger_interval}步")
     
     start_real = time.time()
-    expected_sim_t = 0.0
-    
+    expected_sim_t = 0.0    
     # 速度变化计数器
     velocity_change_counter = 0
     

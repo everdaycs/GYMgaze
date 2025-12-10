@@ -3,14 +3,37 @@
 
 包含:
 - sensors: 传感器定义
+- trigger: 触发策略管理
+- map_generator: 地图生成器
 - RingSonarCore: 环形超声波雷达核心仿真器（从主模块导入）
 - RingSonarRenderer: 渲染器和可视化（从主模块导入）
 """
 
 from .sensors import SonarSensor
+from .trigger import (
+    TriggerMode,
+    TriggerConfig,
+    TriggerManager,
+    DEFAULT_TRIGGER_CONFIG,
+    DATA_COLLECTION_TRIGGER_CONFIG,
+    REAL_WORLD_TRIGGER_CONFIG,
+    create_default_trigger_manager,
+    create_data_collection_trigger_manager,
+    create_demo_trigger_manager
+)
+from .map_generator import DiverseMapGenerator, SimpleMapGenerator
 
-# RingSonarCore 和 RingSonarRenderer 由于与主文件紧密耦合
-# 暂时从 ring_sonar_simulator.py 导入
-# 将来可以进一步模块化
-
-__all__ = ["SonarSensor"]
+__all__ = [
+    "SonarSensor",
+    "TriggerMode",
+    "TriggerConfig", 
+    "TriggerManager",
+    "DEFAULT_TRIGGER_CONFIG",
+    "DATA_COLLECTION_TRIGGER_CONFIG",
+    "REAL_WORLD_TRIGGER_CONFIG",
+    "create_default_trigger_manager",
+    "create_data_collection_trigger_manager",
+    "create_demo_trigger_manager",
+    "DiverseMapGenerator",
+    "SimpleMapGenerator",
+]

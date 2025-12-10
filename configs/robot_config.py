@@ -29,7 +29,7 @@ class RobotPhysicsConfig:
     max_angular_velocity: float = 2.5
     
     # 后退速度倍率（相对于前进速度）
-    backward_speed_ratio: float = 0.5
+    backward_speed_ratio: float = 0.3
     # 前进概率（剩余为后退概率）
     forward_probability: float = 0.85
     
@@ -42,7 +42,7 @@ class RobotPhysicsConfig:
     
     # ============== 传感器触发参数 ==============
     # 传感器触发间隔（每N步触发一次）
-    sensor_trigger_interval: int = 3
+    sensor_trigger_interval: int = 10
     
     # ============== 机器人尺寸 ==============
     robot_size: float = 0.5  # 机器人直径 (m)
@@ -118,7 +118,7 @@ class SimulationConfig:
     sensor: SensorConfig = field(default_factory=SensorConfig)
     world: WorldConfig = field(default_factory=WorldConfig)
     
-    # 触发模式选择权重
+    # 触发模式选择权重（已废弃，请使用 src.simulator.trigger.TriggerManager）
     trigger_mode_weights: dict = field(default_factory=lambda: {
         'sequential': 0.4,
         'interleaved': 0.4,
@@ -126,7 +126,17 @@ class SimulationConfig:
     })
     
     def get_random_trigger_mode(self, rng=None) -> str:
-        """随机选择触发模式"""
+        """
+        随机选择触发模式
+        
+        已废弃: 请使用 src.simulator.trigger.TriggerManager
+        """
+        import warnings
+        warnings.warn(
+            "get_random_trigger_mode 已废弃，请使用 src.simulator.trigger.TriggerManager",
+            DeprecationWarning,
+            stacklevel=2
+        )
         import numpy as np
         if rng is None:
             rng = np.random
