@@ -141,6 +141,12 @@ class RingSonarCore:
         # 传感器读数 (每个传感器的距离测量)
         self.sonar_readings = np.full(self.num_sensors, self.sensor_max_range, dtype=np.float32)
         
+        # 声学仿真参数 (用于跨帧串扰)
+        self.speed_of_sound = 343.0  # 声速 (m/s)
+        self.max_echo_time = 2.0 * self.sensor_max_range / self.speed_of_sound  # 最大往返回波时间
+        self.pending_reflections = []  # 存储在场中飞行的反射事件
+        self.raise_on_crosstalk = False  # 调试阶段可以手动设为 True
+        
         # 触发管理器（使用新的TriggerManager）
         # 注意：必须在sonar_readings初始化之后调用，因为greedy模式会使用它
         self.randomize_trigger = randomize_trigger
@@ -484,6 +490,12 @@ class RingSonarCore:
             self.sonar_readings[sensor_id] = distance
             self.active_sensors_this_frame.add(sensor_id)
         
+        # 新增：先登记反射事件（记录发射时间和反射点）
+        self._register_reflection_events(active_ids)
+
+        # 修改后的串扰逻辑会使用 pending_reflections + 时间轴
+        self._simulate_reflection_interference(active_ids)
+        
         # 前进到下一个触发状态
         self.trigger_manager.advance()
     
@@ -673,6 +685,112 @@ class RingSonarCore:
             return [random.randint(0, self.num_sensors - 1)]
             
         return [best_sensor_id]
+    
+    def _simulate_reflection_interference(self, active_ids: List[int]) -> None:
+        """
+        带声速和时间轴的反射串扰模型：
+        - pending_reflections 保存过去若干帧发射产生的“反射事件”
+        - 当前帧 active 的传感器，如果在自己的监听时间窗内遇到这些回波，就可能被串扰
+        """
+        if not active_ids or not self.pending_reflections:
+            return
+
+        cur_t = self.sim_time
+
+        # 1. 丢弃已经超出最大回波时间的事件
+        self.pending_reflections = [
+            e for e in self.pending_reflections
+            if cur_t - e["emit_time"] <= self.max_echo_time
+        ]
+        if not self.pending_reflections:
+            return
+
+        # 2. 遍历当前帧的“受害传感器”
+        for victim_id in active_ids:
+            victim_sensor = self.sensors[victim_id]
+            victim_pos = victim_sensor.get_world_position(self.robot_pos, self.robot_angle)
+            victim_angle = victim_sensor.get_world_angle(self.robot_angle)
+
+            for event in self.pending_reflections:
+                # 如需忽略自身反射，可以跳过同一 ID
+                if event["source_id"] == victim_id:
+                    continue
+
+                hit_x = event["hit_x"]
+                hit_y = event["hit_y"]
+                dist_src_hit = event["dist_src_hit"]
+                emit_time = event["emit_time"]
+
+                # 源传感器 -> 障碍点到达时间
+                hit_time = emit_time + dist_src_hit / self.speed_of_sound
+
+                # 障碍点 -> 受害传感器距离与时间
+                dist_hit_to_victim = math.hypot(hit_x - victim_pos[0], hit_y - victim_pos[1])
+                arrive_time = hit_time + dist_hit_to_victim / self.speed_of_sound
+
+                # 监听窗口：假设当前帧监听区间为 [cur_t, cur_t + dt)
+                if not (cur_t <= arrive_time < cur_t + self.dt):
+                    continue
+
+                # FOV 检查：反射点是否在受害者视场以内
+                angle_to_hit = math.degrees(math.atan2(hit_y - victim_pos[1], hit_x - victim_pos[0]))
+                angle_diff = abs(angdiff_deg(angle_to_hit, victim_angle))
+                if angle_diff > victim_sensor.fov_angle / 2.0:
+                    continue
+
+                # 总路径长度（A->hit + hit->B）
+                total_path_length = dist_src_hit + dist_hit_to_victim
+
+                # 超出量程或比当前读数更远则跳过
+                if total_path_length >= self.sensor_max_range:
+                    continue
+                if total_path_length >= self.sonar_readings[victim_id]:
+                    continue
+
+                # 概率模型：距离越远串扰概率越低（可以沿用原先的平方衰减）
+                prob = 1.0 - (total_path_length / self.sensor_max_range) ** 2
+                if random.random() < prob:
+                    msg = (
+                        f"[CROSSTALK ERROR] source={event['source_id']} -> victim={victim_id}, "
+                        f"path={total_path_length:.3f} m, arrive_time={arrive_time:.6f} s"
+                    )
+
+                    # 打印错误信息到 stderr
+                    print(msg, file=sys.stderr)
+
+                    # 如开启严格模式，则直接抛异常
+                    if getattr(self, "raise_on_crosstalk", False):
+                        raise RuntimeError(msg)
+
+                    # 最后才真正覆盖受害传感器的读数
+                    self.sonar_readings[victim_id] = total_path_length
+
+    def _register_reflection_events(self, active_ids: List[int]) -> None:
+        """为本帧所有激活的传感器登记反射事件（只记录几何+时间，不立刻做串扰）"""
+        emit_time = self.sim_time  # 约定当前仿真时间是发射时间
+
+        for source_id in active_ids:
+            source_dist = float(self.sonar_readings[source_id])
+            # 没有打到障碍物（接近最大量程），则不产生反射事件
+            if source_dist >= self.sensor_max_range * 0.99:
+                continue
+
+            source_sensor = self.sensors[source_id]
+            source_pos = source_sensor.get_world_position(self.robot_pos, self.robot_angle)
+            source_angle = source_sensor.get_world_angle(self.robot_angle)
+            angle_rad = math.radians(source_angle)
+
+            # 沿波束中心线计算障碍点位置
+            hit_x = source_pos[0] + math.cos(angle_rad) * source_dist
+            hit_y = source_pos[1] + math.sin(angle_rad) * source_dist
+
+            self.pending_reflections.append({
+                "source_id": source_id,
+                "hit_x": hit_x,
+                "hit_y": hit_y,
+                "dist_src_hit": source_dist,
+                "emit_time": emit_time
+            })
 
 
 # ------------------------------- 渲染器 -------------------------------- #
