@@ -17,10 +17,10 @@ class RobotPhysicsConfig:
     
     # ============== 运动参数 ==============
     # 线速度范围 (m/s)
-    linear_velocity_min: float = 2.0
-    linear_velocity_max: float = 5.0
+    linear_velocity_min: float = 0.2
+    linear_velocity_max: float = 1.2
     # 最大线速度限制
-    max_linear_velocity: float = 6.0
+    max_linear_velocity: float = 1.5
     
     # 角速度范围 (rad/s)
     angular_velocity_min: float = -2.0
@@ -95,8 +95,8 @@ class WorldConfig:
     """世界配置"""
     
     # 世界尺寸 (m)
-    world_width: float = 40.0
-    world_height: float = 40.0
+    world_width: float = 20.0
+    world_height: float = 20.0
     
     # 像素/米（渲染用）
     pixel_per_meter: int = 20

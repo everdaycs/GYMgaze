@@ -141,16 +141,18 @@ class GlobalMapDataset(Dataset):
         # 但使用0比0.5更合理，因为边界外通常没有障碍物
         gt_tensor = np.where(gt == -1, 0.0, gt)
         
-        # 组合输入 (T+3, H, W) - 保持与之前兼容
+        # 组合输入 (T+4, H, W) - 保持与之前兼容
         # - T帧局部观测
         # - 1帧全局累积
         # - 1帧访问计数
         # - 1帧已知掩码
+        # - 1帧边界掩码
         input_tensor = np.concatenate([
             local_seq,                          # (T, H, W)
             global_acc[np.newaxis, :, :],       # (1, H, W)
             global_visit[np.newaxis, :, :],     # (1, H, W)
-            known_mask[np.newaxis, :, :]        # (1, H, W)
+            known_mask[np.newaxis, :, :],       # (1, H, W)
+            border_mask[np.newaxis, :, :]       # (1, H, W)
         ], axis=0)
         
         return (
@@ -225,12 +227,11 @@ class GlobalMapTrainer:
         self.model.train()
         total_loss = 0
         
-        for inputs, targets, valid_masks, known_masks, border_masks in tqdm(dataloader, desc="Training"):
+        for inputs, targets, valid_masks, known_masks in tqdm(dataloader, desc="Training"):
             inputs = inputs.to(self.device)
             targets = targets.to(self.device)
             valid_masks = valid_masks.to(self.device)
             known_masks = known_masks.to(self.device)
-            # border_masks 已包含在 inputs 中，不需要单独传递
             
             # Forward
             outputs = self.model(inputs, known_masks.unsqueeze(1))
@@ -252,12 +253,11 @@ class GlobalMapTrainer:
         self.model.train()
         total_loss = 0
         
-        for inputs, targets, valid_masks, known_masks, border_masks in tqdm(dataloader, desc="Training (AMP)"):
+        for inputs, targets, valid_masks, known_masks in tqdm(dataloader, desc="Training (AMP)"):
             inputs = inputs.to(self.device)
             targets = targets.to(self.device)
             valid_masks = valid_masks.to(self.device)
             known_masks = known_masks.to(self.device)
-            # border_masks 已包含在 inputs 中，不需要单独传递
             
             optimizer.zero_grad()
             
@@ -294,12 +294,11 @@ class GlobalMapTrainer:
         unknown_total = 0
         
         with torch.no_grad():
-            for inputs, targets, valid_masks, known_masks, border_masks in dataloader:
+            for inputs, targets, valid_masks, known_masks in dataloader:
                 inputs = inputs.to(self.device)
                 targets = targets.to(self.device)
                 valid_masks = valid_masks.to(self.device)
                 known_masks = known_masks.to(self.device)
-                # border_masks 已包含在 inputs 中，不需要单独传递
                 
                 outputs = self.model(inputs, known_masks.unsqueeze(1))
                 

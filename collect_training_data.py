@@ -36,17 +36,29 @@ class GlobalMapDataCollector:
 
     def __init__(self, data_dir: str = "./data/global_map_training_data", 
                  sequence_length: int = 5,
-                 grid_size: int = 400,
-                 config: SimulationConfig = None):  # 使用配置对象
+                 grid_size: int = None,  # 如果为None，则根据配置自动计算
+                 config: SimulationConfig = None,  # 使用配置对象
+                 trigger_mode: str = None,  # 触发模式：None表示随机，指定则使用固定模式
+                 randomize_trigger: bool = True):  # 是否随机化触发模式
         self.data_dir = data_dir
         self.sequence_length = sequence_length
-        self.grid_size = grid_size
-        os.makedirs(data_dir, exist_ok=True)
         
         # 使用配置对象（如果提供）或使用默认数据收集配置
         if config is None:
             config = DATA_COLLECTION_CONFIG
         self.config = config
+        
+        # 触发模式设置
+        self.trigger_mode = trigger_mode
+        self.randomize_trigger = randomize_trigger
+        
+        # 根据配置计算栅格尺寸（如果未指定）
+        if grid_size is None:
+            grid_size = config.world.grid_size
+        self.grid_size = grid_size
+        
+        # 确保数据目录存在
+        os.makedirs(data_dir, exist_ok=True)
         
         # 边界排除（地图物理边界）
         self.border_margin = 10
@@ -60,13 +72,24 @@ class GlobalMapDataCollector:
     def collect_episode(self, episode_id: int, max_steps: int = 500) -> Dict:
         """收集一个episode的全局地图数据"""
         
-        # 创建环境（使用配置，启用随机触发模式）
-        core = RingSonarCore(
-            world_width=self.config.world.world_width,
-            world_height=self.config.world.world_height,
-            randomize_trigger=True,  # 使用新的TriggerManager随机选择模式
-            config=self.config
-        )
+        # 创建环境（使用配置，根据参数设置触发模式）
+        if self.trigger_mode is not None:
+            # 使用指定的触发模式
+            core = RingSonarCore(
+                world_width=self.config.world.world_width,
+                world_height=self.config.world.world_height,
+                trigger_mode=self.trigger_mode,
+                randomize_trigger=False,  # 不随机化，使用指定模式
+                config=self.config
+            )
+        else:
+            # 使用随机触发模式（默认行为）
+            core = RingSonarCore(
+                world_width=self.config.world.world_width,
+                world_height=self.config.world.world_height,
+                randomize_trigger=self.randomize_trigger,
+                config=self.config
+            )
         renderer = RingSonarRenderer(core, render_mode=None, enable_prediction=False)
         
         # 【关键】使用多样化地图生成器替换默认障碍物生成
@@ -337,6 +360,11 @@ def main():
                        help='时间序列长度')
     parser.add_argument('--batch-size', type=int, default=50,
                        help='Memory optimization: save every N episodes')
+    parser.add_argument('--trigger-mode', type=str, default=None,
+                       choices=['sequential', 'interleaved', 'sector', 'all', 'greedy'],
+                       help='传感器触发模式：None表示随机选择，指定则使用固定模式')
+    parser.add_argument('--no-random-trigger', action='store_true',
+                       help='禁用随机触发模式（仅在使用--trigger-mode时有效）')
     
     # 物理参数（可选覆盖配置）
     parser.add_argument('--robot-speed-min', type=float, default=None,
@@ -371,7 +399,9 @@ def main():
     collector = GlobalMapDataCollector(
         data_dir=args.data_dir,
         sequence_length=args.sequence_length,
-        config=config
+        config=config,
+        trigger_mode=args.trigger_mode,
+        randomize_trigger=not args.no_random_trigger
     )
     collector.collect_dataset(args.episodes, args.max_steps, batch_size=args.batch_size)
 
