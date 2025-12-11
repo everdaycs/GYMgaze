@@ -69,13 +69,7 @@ except ImportError:
 # ------------------------------- 核心模拟器 -------------------------------- #
 
 class RingSonarCore:
-    """
-    环形超声波雷达核心模拟器
-    - 12个超声波传感器均匀分布在15cm半径圆盘上
-    - 每个传感器独立扫描65° FoV
-    - 2D世界，俯视图
-    """
-    
+
     def __init__(self,
                  world_width: float = None,
                  world_height: float = None,
@@ -1603,7 +1597,7 @@ if __name__ == "__main__":
     parser.add_argument('--headless', action='store_true', help='无可视化模式')
     parser.add_argument('--realtime', action='store_true', help='实时速度运行')
     parser.add_argument('--steps', type=int, default=10000000, help='仿真步数')
-    parser.add_argument('--world-size', type=float, default=20.0, help='世界大小(米)')
+    parser.add_argument('--world-size', type=float, default=40.0, help='世界大小(米)')
     parser.add_argument('--speed', type=float, default=1.0, help='速度倍率 (0.5=慢一倍, 2.0=快一倍)')
     parser.add_argument('--trigger-mode', type=str, default='sequential', 
                        choices=['sequential', 'interleaved', 'sector', 'all', 'greedy'], 

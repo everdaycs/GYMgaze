@@ -95,14 +95,14 @@ class WorldConfig:
     """世界配置"""
     
     # 世界尺寸 (m)
-    world_width: float = 20.0
-    world_height: float = 20.0
+    world_width: float = 40.0
+    world_height: float = 40.0
     
     # 像素/米（渲染用）
     pixel_per_meter: int = 20
     
     # 栅格地图分辨率
-    grid_resolution: float = 0.1  # 米/栅格
+    grid_resolution: float = 0.1  # 米/栅格 (40m / 0.1m = 400x400 grid)
     
     @property
     def grid_size(self) -> int:
