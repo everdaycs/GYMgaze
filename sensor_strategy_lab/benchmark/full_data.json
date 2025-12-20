@@ -1,0 +1,677 @@
+[
+    {
+        "strategy": "sequential",
+        "seed": 10,
+        "scene_type": "sparse",
+        "coverage": 2589,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 10,
+        "scene_type": "sparse",
+        "coverage": 2701,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 10,
+        "scene_type": "sparse",
+        "coverage": 3483,
+        "crosstalk_count": 85,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.028333333333333332
+    },
+    {
+        "strategy": "greedy",
+        "seed": 10,
+        "scene_type": "sparse",
+        "coverage": 3832,
+        "crosstalk_count": 98,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.0245
+    },
+    {
+        "strategy": "rl",
+        "seed": 10,
+        "scene_type": "sparse",
+        "coverage": 3734,
+        "crosstalk_count": 242,
+        "total_firings": 7872,
+        "crosstalk_rate": 0.030741869918699188
+    },
+    {
+        "strategy": "sequential",
+        "seed": 20,
+        "scene_type": "sparse",
+        "coverage": 2019,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 20,
+        "scene_type": "sparse",
+        "coverage": 1952,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 20,
+        "scene_type": "sparse",
+        "coverage": 2768,
+        "crosstalk_count": 89,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.029666666666666668
+    },
+    {
+        "strategy": "greedy",
+        "seed": 20,
+        "scene_type": "sparse",
+        "coverage": 2963,
+        "crosstalk_count": 144,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.036
+    },
+    {
+        "strategy": "rl",
+        "seed": 20,
+        "scene_type": "sparse",
+        "coverage": 2862,
+        "crosstalk_count": 211,
+        "total_firings": 6865,
+        "crosstalk_rate": 0.03073561544064093
+    },
+    {
+        "strategy": "sequential",
+        "seed": 30,
+        "scene_type": "sparse",
+        "coverage": 1792,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 30,
+        "scene_type": "sparse",
+        "coverage": 1764,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 30,
+        "scene_type": "sparse",
+        "coverage": 2021,
+        "crosstalk_count": 37,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.012333333333333333
+    },
+    {
+        "strategy": "greedy",
+        "seed": 30,
+        "scene_type": "sparse",
+        "coverage": 2128,
+        "crosstalk_count": 50,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.0125
+    },
+    {
+        "strategy": "rl",
+        "seed": 30,
+        "scene_type": "sparse",
+        "coverage": 2188,
+        "crosstalk_count": 166,
+        "total_firings": 8079,
+        "crosstalk_rate": 0.02054709741304617
+    },
+    {
+        "strategy": "sequential",
+        "seed": 40,
+        "scene_type": "sparse",
+        "coverage": 1747,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 40,
+        "scene_type": "sparse",
+        "coverage": 1767,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 40,
+        "scene_type": "sparse",
+        "coverage": 2234,
+        "crosstalk_count": 82,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.027333333333333334
+    },
+    {
+        "strategy": "greedy",
+        "seed": 40,
+        "scene_type": "sparse",
+        "coverage": 2369,
+        "crosstalk_count": 86,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.0215
+    },
+    {
+        "strategy": "rl",
+        "seed": 40,
+        "scene_type": "sparse",
+        "coverage": 2389,
+        "crosstalk_count": 238,
+        "total_firings": 8324,
+        "crosstalk_rate": 0.028592023065833735
+    },
+    {
+        "strategy": "sequential",
+        "seed": 50,
+        "scene_type": "sparse",
+        "coverage": 2443,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 50,
+        "scene_type": "sparse",
+        "coverage": 2436,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 50,
+        "scene_type": "sparse",
+        "coverage": 3022,
+        "crosstalk_count": 117,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.039
+    },
+    {
+        "strategy": "greedy",
+        "seed": 50,
+        "scene_type": "sparse",
+        "coverage": 3165,
+        "crosstalk_count": 127,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.03175
+    },
+    {
+        "strategy": "rl",
+        "seed": 50,
+        "scene_type": "sparse",
+        "coverage": 3225,
+        "crosstalk_count": 354,
+        "total_firings": 8273,
+        "crosstalk_rate": 0.042789798138522905
+    },
+    {
+        "strategy": "sequential",
+        "seed": 10,
+        "scene_type": "simple",
+        "coverage": 2025,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 10,
+        "scene_type": "simple",
+        "coverage": 2032,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 10,
+        "scene_type": "simple",
+        "coverage": 2487,
+        "crosstalk_count": 61,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.02033333333333333
+    },
+    {
+        "strategy": "greedy",
+        "seed": 10,
+        "scene_type": "simple",
+        "coverage": 2620,
+        "crosstalk_count": 82,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.0205
+    },
+    {
+        "strategy": "rl",
+        "seed": 10,
+        "scene_type": "simple",
+        "coverage": 2680,
+        "crosstalk_count": 277,
+        "total_firings": 8071,
+        "crosstalk_rate": 0.03432040639325982
+    },
+    {
+        "strategy": "sequential",
+        "seed": 20,
+        "scene_type": "simple",
+        "coverage": 2090,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 20,
+        "scene_type": "simple",
+        "coverage": 2099,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 20,
+        "scene_type": "simple",
+        "coverage": 2795,
+        "crosstalk_count": 36,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.012
+    },
+    {
+        "strategy": "greedy",
+        "seed": 20,
+        "scene_type": "simple",
+        "coverage": 2992,
+        "crosstalk_count": 54,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.0135
+    },
+    {
+        "strategy": "rl",
+        "seed": 20,
+        "scene_type": "simple",
+        "coverage": 3006,
+        "crosstalk_count": 99,
+        "total_firings": 7288,
+        "crosstalk_rate": 0.01358397365532382
+    },
+    {
+        "strategy": "sequential",
+        "seed": 30,
+        "scene_type": "simple",
+        "coverage": 1935,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 30,
+        "scene_type": "simple",
+        "coverage": 1929,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 30,
+        "scene_type": "simple",
+        "coverage": 2267,
+        "crosstalk_count": 34,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.011333333333333334
+    },
+    {
+        "strategy": "greedy",
+        "seed": 30,
+        "scene_type": "simple",
+        "coverage": 2467,
+        "crosstalk_count": 35,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.00875
+    },
+    {
+        "strategy": "rl",
+        "seed": 30,
+        "scene_type": "simple",
+        "coverage": 2529,
+        "crosstalk_count": 106,
+        "total_firings": 8410,
+        "crosstalk_rate": 0.012604042806183116
+    },
+    {
+        "strategy": "sequential",
+        "seed": 40,
+        "scene_type": "simple",
+        "coverage": 2213,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 40,
+        "scene_type": "simple",
+        "coverage": 2175,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 40,
+        "scene_type": "simple",
+        "coverage": 2721,
+        "crosstalk_count": 49,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.01633333333333333
+    },
+    {
+        "strategy": "greedy",
+        "seed": 40,
+        "scene_type": "simple",
+        "coverage": 2877,
+        "crosstalk_count": 74,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.0185
+    },
+    {
+        "strategy": "rl",
+        "seed": 40,
+        "scene_type": "simple",
+        "coverage": 2940,
+        "crosstalk_count": 209,
+        "total_firings": 8806,
+        "crosstalk_rate": 0.02373381785146491
+    },
+    {
+        "strategy": "sequential",
+        "seed": 50,
+        "scene_type": "simple",
+        "coverage": 1715,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 50,
+        "scene_type": "simple",
+        "coverage": 1676,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 50,
+        "scene_type": "simple",
+        "coverage": 1969,
+        "crosstalk_count": 24,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.008
+    },
+    {
+        "strategy": "greedy",
+        "seed": 50,
+        "scene_type": "simple",
+        "coverage": 2083,
+        "crosstalk_count": 29,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.00725
+    },
+    {
+        "strategy": "rl",
+        "seed": 50,
+        "scene_type": "simple",
+        "coverage": 2163,
+        "crosstalk_count": 65,
+        "total_firings": 8550,
+        "crosstalk_rate": 0.00760233918128655
+    },
+    {
+        "strategy": "sequential",
+        "seed": 10,
+        "scene_type": "corridor",
+        "coverage": 1868,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 10,
+        "scene_type": "corridor",
+        "coverage": 1818,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 10,
+        "scene_type": "corridor",
+        "coverage": 2395,
+        "crosstalk_count": 42,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.014
+    },
+    {
+        "strategy": "greedy",
+        "seed": 10,
+        "scene_type": "corridor",
+        "coverage": 2463,
+        "crosstalk_count": 53,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.01325
+    },
+    {
+        "strategy": "rl",
+        "seed": 10,
+        "scene_type": "corridor",
+        "coverage": 2443,
+        "crosstalk_count": 166,
+        "total_firings": 8540,
+        "crosstalk_rate": 0.019437939110070256
+    },
+    {
+        "strategy": "sequential",
+        "seed": 20,
+        "scene_type": "corridor",
+        "coverage": 1480,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 20,
+        "scene_type": "corridor",
+        "coverage": 1401,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 20,
+        "scene_type": "corridor",
+        "coverage": 1918,
+        "crosstalk_count": 71,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.023666666666666666
+    },
+    {
+        "strategy": "greedy",
+        "seed": 20,
+        "scene_type": "corridor",
+        "coverage": 2010,
+        "crosstalk_count": 104,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.026
+    },
+    {
+        "strategy": "rl",
+        "seed": 20,
+        "scene_type": "corridor",
+        "coverage": 2059,
+        "crosstalk_count": 259,
+        "total_firings": 8077,
+        "crosstalk_rate": 0.03206636127274978
+    },
+    {
+        "strategy": "sequential",
+        "seed": 30,
+        "scene_type": "corridor",
+        "coverage": 2597,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 30,
+        "scene_type": "corridor",
+        "coverage": 2604,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 30,
+        "scene_type": "corridor",
+        "coverage": 3168,
+        "crosstalk_count": 58,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.019333333333333334
+    },
+    {
+        "strategy": "greedy",
+        "seed": 30,
+        "scene_type": "corridor",
+        "coverage": 3324,
+        "crosstalk_count": 61,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.01525
+    },
+    {
+        "strategy": "rl",
+        "seed": 30,
+        "scene_type": "corridor",
+        "coverage": 3306,
+        "crosstalk_count": 120,
+        "total_firings": 7842,
+        "crosstalk_rate": 0.015302218821729151
+    },
+    {
+        "strategy": "sequential",
+        "seed": 40,
+        "scene_type": "corridor",
+        "coverage": 1754,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 40,
+        "scene_type": "corridor",
+        "coverage": 1722,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 40,
+        "scene_type": "corridor",
+        "coverage": 2102,
+        "crosstalk_count": 30,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.01
+    },
+    {
+        "strategy": "greedy",
+        "seed": 40,
+        "scene_type": "corridor",
+        "coverage": 2277,
+        "crosstalk_count": 66,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.0165
+    },
+    {
+        "strategy": "rl",
+        "seed": 40,
+        "scene_type": "corridor",
+        "coverage": 2310,
+        "crosstalk_count": 152,
+        "total_firings": 8408,
+        "crosstalk_rate": 0.01807802093244529
+    },
+    {
+        "strategy": "sequential",
+        "seed": 50,
+        "scene_type": "corridor",
+        "coverage": 1035,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "interleaved",
+        "seed": 50,
+        "scene_type": "corridor",
+        "coverage": 1011,
+        "crosstalk_count": 0,
+        "total_firings": 1000,
+        "crosstalk_rate": 0.0
+    },
+    {
+        "strategy": "sector",
+        "seed": 50,
+        "scene_type": "corridor",
+        "coverage": 1477,
+        "crosstalk_count": 16,
+        "total_firings": 3000,
+        "crosstalk_rate": 0.005333333333333333
+    },
+    {
+        "strategy": "greedy",
+        "seed": 50,
+        "scene_type": "corridor",
+        "coverage": 1557,
+        "crosstalk_count": 18,
+        "total_firings": 4000,
+        "crosstalk_rate": 0.0045
+    },
+    {
+        "strategy": "rl",
+        "seed": 50,
+        "scene_type": "corridor",
+        "coverage": 1514,
+        "crosstalk_count": 45,
+        "total_firings": 9153,
+        "crosstalk_rate": 0.004916420845624385
+    }
+]

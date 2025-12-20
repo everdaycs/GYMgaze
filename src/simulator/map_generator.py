@@ -95,8 +95,8 @@ class DiverseMapGenerator:
         for _ in range(num):
             x = np.random.uniform(3, self.world_width - 5)
             y = np.random.uniform(3, self.world_height - 5)
-            w = np.random.uniform(1.5, 4.0)
-            h = np.random.uniform(1.5, 4.0)
+            w = np.random.uniform(1.0, 2.5)
+            h = np.random.uniform(1.0, 2.5)
             obstacles.append(('rect', (x, y, w, h)))
         
         return obstacles
@@ -111,8 +111,8 @@ class DiverseMapGenerator:
         for _ in range(num):
             x = np.random.uniform(3, self.world_width - 5)
             y = np.random.uniform(3, self.world_height - 5)
-            w = np.random.uniform(1.5, 4.5)
-            h = np.random.uniform(1.5, 4.5)
+            w = np.random.uniform(1.0, 3.0)
+            h = np.random.uniform(1.0, 3.0)
             obstacles.append(('rect', (x, y, w, h)))
         
         return obstacles
@@ -134,16 +134,16 @@ class DiverseMapGenerator:
             for _ in range(np.random.randint(6, 9)):
                 x = np.random.uniform(2.5, self.world_width - 5)
                 y = np.random.uniform(corridor_y + corridor_width / 2 + 1, self.world_height - 2.5)
-                w = np.random.uniform(2.0, 4.0)
-                h = np.random.uniform(2.0, 4.0)
+                w = np.random.uniform(1.0, 2.5)
+                h = np.random.uniform(1.0, 2.5)
                 obstacles.append(('rect', (x, y, w, h)))
             
             # 下半部分障碍物（6-8个）
             for _ in range(np.random.randint(6, 9)):
                 x = np.random.uniform(2.5, self.world_width - 5)
                 y = np.random.uniform(2.5, corridor_y - corridor_width / 2 - 1)
-                w = np.random.uniform(2.0, 4.0)
-                h = np.random.uniform(2.0, 4.0)
+                w = np.random.uniform(1.0, 2.5)
+                h = np.random.uniform(1.0, 2.5)
                 obstacles.append(('rect', (x, y, w, h)))
         else:
             # 垂直走廊（中间清空）
@@ -154,16 +154,16 @@ class DiverseMapGenerator:
             for _ in range(np.random.randint(6, 9)):
                 x = np.random.uniform(2.5, corridor_x - corridor_width / 2 - 1)
                 y = np.random.uniform(2.5, self.world_height - 5)
-                w = np.random.uniform(2.0, 4.0)
-                h = np.random.uniform(2.0, 4.0)
+                w = np.random.uniform(1.0, 2.5)
+                h = np.random.uniform(1.0, 2.5)
                 obstacles.append(('rect', (x, y, w, h)))
             
             # 右半部分障碍物（6-8个）
             for _ in range(np.random.randint(6, 9)):
                 x = np.random.uniform(corridor_x + corridor_width / 2 + 1, self.world_width - 2.5)
                 y = np.random.uniform(2.5, self.world_height - 5)
-                w = np.random.uniform(2.0, 4.0)
-                h = np.random.uniform(2.0, 4.0)
+                w = np.random.uniform(1.0, 2.5)
+                h = np.random.uniform(1.0, 2.5)
                 obstacles.append(('rect', (x, y, w, h)))
         
         return obstacles
@@ -207,8 +207,8 @@ class DiverseMapGenerator:
             for _ in range(num_furniture):
                 fx = cx + np.random.uniform(-cell_w/4, cell_w/4)
                 fy = cy + np.random.uniform(-cell_h/4, cell_h/4)
-                fw = np.random.uniform(1.0, 2.5)
-                fh = np.random.uniform(1.0, 2.5)
+                fw = np.random.uniform(0.8, 1.8)
+                fh = np.random.uniform(0.8, 1.8)
                 obstacles.append(('rect', (fx, fy, fw, fh)))
         
         return obstacles
@@ -242,8 +242,8 @@ class SimpleMapGenerator:
         for _ in range(num_obstacles):
             x = random.uniform(2.5, self.world_width - 2.5)
             y = random.uniform(2.5, self.world_height - 2.5)
-            w = random.uniform(2.0, 5.0)
-            h = random.uniform(2.0, 5.0)
+            w = random.uniform(1.0, 3.0)
+            h = random.uniform(1.0, 3.0)
             obstacles.append(('rect', (x, y, w, h)))
         
         return obstacles

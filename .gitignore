@@ -39,5 +39,9 @@ global_map_prediction_demo/
 !ring_sonar_observations.png
 
 # 日志
+logs/
 *.log
 nohup.out
+
+# 模型
+*.zip

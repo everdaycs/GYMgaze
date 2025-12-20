@@ -48,6 +48,7 @@ from src.simulator.trigger import (
     TriggerManager, TriggerMode, TriggerConfig,
     DEFAULT_TRIGGER_CONFIG, DATA_COLLECTION_TRIGGER_CONFIG
 )
+from src.simulator.trigger_strategies import TriggerContext
 
 # 导入多样化地图生成器
 from src.simulator.map_generator import DiverseMapGenerator
@@ -129,8 +130,11 @@ class RingSonarCore:
         self.max_angular_velocity = config.robot.max_angular_velocity
         
         # 传感器触发控制 - 控制何时实际扫描传感器
-        self.sensor_trigger_interval = max(1, int(config.robot.sensor_trigger_interval))
-        self.sensor_trigger_counter = 0  # 计数器，当达到interval时触发扫描
+        # self.sensor_trigger_interval = max(1, int(config.robot.sensor_trigger_interval)) # 已弃用
+        # self.sensor_trigger_counter = 0  # 已弃用
+        
+        # 传感器就绪时间 (每个传感器下一次可以触发的仿真时间)
+        self.sensor_ready_times = np.zeros(self.num_sensors, dtype=np.float64)
         
         # 传感器读数 (每个传感器的距离测量)
         self.sonar_readings = np.full(self.num_sensors, self.sensor_max_range, dtype=np.float32)
@@ -140,6 +144,10 @@ class RingSonarCore:
         self.max_echo_time = 2.0 * self.sensor_max_range / self.speed_of_sound  # 最大往返回波时间
         self.pending_reflections = []  # 存储在场中飞行的反射事件
         self.raise_on_crosstalk = False  # 调试阶段可以手动设为 True
+        
+        # 统计信息
+        self.crosstalk_count = 0
+        self.total_sensor_firings = 0
         
         # 触发管理器（使用新的TriggerManager）
         # 注意：必须在sonar_readings初始化之后调用，因为greedy模式会使用它
@@ -195,9 +203,6 @@ class RingSonarCore:
             config=trigger_config,
             initial_mode=initial_mode
         )
-        
-        # 注册贪心策略回调
-        self.trigger_manager.set_greedy_callback(self._greedy_trigger_strategy)
         
         # 如果需要随机化，立即随机选择模式
         if randomize:
@@ -292,7 +297,10 @@ class RingSonarCore:
         self.feature_map.fill(0.0)
         self.global_feature_map.fill(0.0)
         self.sonar_readings.fill(self.sensor_max_range)
-        self.sensor_trigger_counter = 0  # 重置触发计数器
+        self.sensor_ready_times.fill(0.0)
+        
+        self.crosstalk_count = 0
+        self.total_sensor_firings = 0
         
         self._collision_occurred = False
         self._stuck_counter = 0
@@ -322,16 +330,11 @@ class RingSonarCore:
         else:
             self._stuck_counter = 0
         
-        # 更新传感器触发计数器
-        self.sensor_trigger_counter += 1
-        
         # 清空本帧活跃传感器记录（在开始时清空）
         self.active_sensors_this_frame.clear()
         
-        # 只在触发间隔时刻扫描传感器
-        if self.sensor_trigger_counter >= self.sensor_trigger_interval:
-            self._scan_all_sensors()
-            self.sensor_trigger_counter = 0
+        # 尝试触发传感器 (基于就绪状态)
+        self._process_sensor_trigger()
         
         self.step_counter += 1
     
@@ -472,17 +475,59 @@ class RingSonarCore:
         """获取当前帧应激活的传感器ID列表"""
         return self.trigger_manager.get_active_sensors()
     
-    def _scan_all_sensors(self):
-        """扫描传感器（根据触发模式）"""
-        # 获取需要激活的传感器ID（使用TriggerManager）
-        active_ids = self.trigger_manager.get_active_sensors()
+    def _process_sensor_trigger(self, force_ids: List[int] = None):
+        """处理传感器触发逻辑 (基于就绪状态)"""
+        if force_ids is not None:
+            candidate_ids = force_ids
+        else:
+            # 创建触发上下文
+            context = TriggerContext(
+                step_count=self.step_counter,
+                sim_time=self.sim_time,
+                sonar_readings=self.sonar_readings,
+                robot_pos=self.robot_pos,
+                robot_angle=self.robot_angle,
+                sensors=self.sensors,
+                sensor_ready_times=self.sensor_ready_times,
+                global_feature_map=self.global_feature_map,
+                feature_map_resolution=self.feature_map_resolution,
+                world_dims=(self.world_width, self.world_height),
+                sensor_max_range=self.sensor_max_range
+            )
+            
+            # 获取策略建议激活的传感器ID
+            candidate_ids = self.trigger_manager.get_active_sensors(context)
+        
+        if not candidate_ids:
+            return
+            
+        # 检查所有候选传感器是否都已就绪
+        # 只有当所有候选者都准备好时才触发 (保持策略的同步性)
+        all_ready = True
+        for sensor_id in candidate_ids:
+            if self.sim_time < self.sensor_ready_times[sensor_id]:
+                all_ready = False
+                break
+        
+        if not all_ready:
+            return  # 等待
+            
+        # 执行扫描
+        active_ids = candidate_ids
         
         # 扫描激活的传感器
         for sensor_id in active_ids:
+            self.total_sensor_firings += 1
             sensor = self.sensors[sensor_id]
             distance = self._scan_single_sensor(sensor)
             self.sonar_readings[sensor_id] = distance
             self.active_sensors_this_frame.add(sensor_id)
+            
+            # 更新该传感器的下一次就绪时间
+            # 就绪时间 = 当前时间 + 飞行时间 (2 * distance / c)
+            # 增加一个极小的缓冲时间 (e.g. 10ms) 模拟硬件处理延迟
+            flight_time = max(0.01, 2.0 * distance / self.speed_of_sound)
+            self.sensor_ready_times[sensor_id] = self.sim_time + flight_time
         
         # 新增：先登记反射事件（记录发射时间和反射点）
         self._register_reflection_events(active_ids)
@@ -621,65 +666,7 @@ class RingSonarCore:
         
         # 轻微模糊
         self.feature_map = cv2.GaussianBlur(self.feature_map, (3, 3), 0.5)
-    
-    def _greedy_trigger_strategy(self) -> List[int]:
-        """
-        贪心触发策略：优先扫描已知障碍物但Fisher信息较低的区域
-        """
-        candidates = []
-        
-        # 1. 找出所有最近探测到障碍物的传感器
-        for i, reading in enumerate(self.sonar_readings):
-            if reading < self.sensor_max_range * 0.95:
-                candidates.append(i)
-        
-        # 2. 如果没有发现障碍物，随机选择一个
-        if not candidates:
-            return [random.randint(0, self.num_sensors - 1)]
             
-        # 3. 评估每个候选传感器的"信息需求"
-        best_sensor_id = candidates[0]
-        min_fisher_val = float('inf')
-        
-        # 随机打乱候选者，避免平局时的偏好
-        random.shuffle(candidates)
-        
-        for sensor_id in candidates:
-            sensor = self.sensors[sensor_id]
-            dist = self.sonar_readings[sensor_id]
-            
-            # 计算障碍物位置估计
-            sensor_pos = sensor.get_world_position(self.robot_pos, self.robot_angle)
-            sensor_angle = sensor.get_world_angle(self.robot_angle)
-            angle_rad = math.radians(sensor_angle)
-            
-            wx = sensor_pos[0] + math.cos(angle_rad) * dist
-            wy = sensor_pos[1] + math.sin(angle_rad) * dist
-            
-            # 转换为地图坐标
-            res = self.feature_map_resolution
-            ms = self.global_feature_map_size
-            ww = self.world_width
-            wh = self.world_height
-            
-            gx = int(wx / res + ms // 2 - ww // (2 * res))
-            gy = int(wy / res + ms // 2 - wh // (2 * res))
-            
-            val = 0.0
-            if 0 <= gx < ms and 0 <= gy < ms:
-                val = self.global_feature_map[gy, gx]
-            
-            # 选择Fisher信息最低（最不确定）的目标
-            if val < min_fisher_val:
-                min_fisher_val = val
-                best_sensor_id = sensor_id
-        
-        # 4. 20%概率随机探索，避免陷入局部最优
-        if random.random() < 0.2:
-            return [random.randint(0, self.num_sensors - 1)]
-            
-        return [best_sensor_id]
-    
     def _simulate_reflection_interference(self, active_ids: List[int]) -> None:
         """
         带声速和时间轴的反射串扰模型：
@@ -722,8 +709,16 @@ class RingSonarCore:
                 dist_hit_to_victim = math.hypot(hit_x - victim_pos[0], hit_y - victim_pos[1])
                 arrive_time = hit_time + dist_hit_to_victim / self.speed_of_sound
 
-                # 监听窗口：假设当前帧监听区间为 [cur_t, cur_t + dt)
-                if not (cur_t <= arrive_time < cur_t + self.dt):
+                # 监听窗口检查：
+                # 传感器在 cur_t 发射，在 cur_t + flight_time 收到真实回波。
+                # 如果干扰波在 (cur_t, cur_t + flight_time) 之间到达，则可能被误判为真实回波。
+                # 注意：flight_time 是基于当前真实探测距离计算的。
+                
+                current_true_dist = self.sonar_readings[victim_id]
+                true_echo_time = cur_t + 2.0 * current_true_dist / self.speed_of_sound
+                
+                # 干扰必须在发射之后，且在真实回波之前到达
+                if not (cur_t < arrive_time < true_echo_time):
                     continue
 
                 # FOV 检查：反射点是否在受害者视场以内
@@ -744,13 +739,14 @@ class RingSonarCore:
                 # 概率模型：距离越远串扰概率越低（可以沿用原先的平方衰减）
                 prob = 1.0 - (total_path_length / self.sensor_max_range) ** 2
                 if random.random() < prob:
+                    self.crosstalk_count += 1
                     msg = (
                         f"[CROSSTALK ERROR] source={event['source_id']} -> victim={victim_id}, "
                         f"path={total_path_length:.3f} m, arrive_time={arrive_time:.6f} s"
                     )
 
                     # 打印错误信息到 stderr
-                    print(msg, file=sys.stderr)
+                    # print(msg, file=sys.stderr) # 暂时注释掉，避免刷屏
 
                     # 如开启严格模式，则直接抛异常
                     if getattr(self, "raise_on_crosstalk", False):

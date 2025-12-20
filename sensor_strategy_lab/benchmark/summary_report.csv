@@ -1,0 +1,8 @@
+,coverage,coverage,crosstalk_rate,crosstalk_rate,total_firings
+,mean,std,mean,std,mean
+strategy,,,,,
+greedy,2608.4667,588.1497,0.018,0.0089,4000.0
+interleaved,1939.1333,439.3036,0.0,0.0,1000.0
+rl,2623.2,567.798,0.0223,0.0107,8170.5333
+sector,2455.1333,538.1045,0.0185,0.0095,3000.0
+sequential,1953.4667,413.5078,0.0,0.0,1000.0

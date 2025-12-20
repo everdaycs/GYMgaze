@@ -31,6 +31,11 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable
 
+from src.simulator.trigger_strategies import (
+    BaseTriggerStrategy, SequentialStrategy, InterleavedStrategy, 
+    SectorStrategy, AllStrategy, GreedyStrategy, TriggerContext
+)
+
 
 class TriggerMode(Enum):
     """触发模式枚举"""
@@ -39,6 +44,7 @@ class TriggerMode(Enum):
     SECTOR = "sector"              # 扇区轮询：前/右/后/左
     ALL = "all"                    # 全部触发（仅仿真用）
     GREEDY = "greedy"              # 贪心策略：基于外部提供的价值函数选择
+    RL = "rl"                      # 强化学习策略：使用训练好的模型决策
     
     @classmethod
     def from_string(cls, mode_str: str) -> 'TriggerMode':
@@ -48,7 +54,8 @@ class TriggerMode(Enum):
             'interleaved': cls.INTERLEAVED,
             'sector': cls.SECTOR,
             'all': cls.ALL,
-            'greedy': cls.GREEDY
+            'greedy': cls.GREEDY,
+            'rl': cls.RL
         }
         return mode_map.get(mode_str.lower(), cls.SEQUENTIAL)
     
@@ -130,24 +137,34 @@ class TriggerManager:
         self.num_sensors = num_sensors
         self.config = config or TriggerConfig()
         
-        # 贪心策略回调函数
-        self._greedy_callback: Optional[Callable[[], List[int]]] = None
+        # 初始化策略
+        self._strategies: Dict[TriggerMode, BaseTriggerStrategy] = {}
+        self._init_strategies()
         
         # 当前模式
         if initial_mode is not None:
             self._mode = initial_mode
         else:
             self._mode = TriggerMode.SEQUENTIAL
-        
-        # 状态索引
-        self._sequential_index = 0
-        self._sector_index = 0
-        self._interleaved_group_index = 0
-        self._interleaved_sensor_index = 0
+            
+        self._current_strategy = self._strategies[self._mode]
         
         # 统计信息
         self._step_count = 0
         self._mode_history: List[TriggerMode] = []
+        
+    def _init_strategies(self):
+        """初始化所有策略实例"""
+        self._strategies[TriggerMode.SEQUENTIAL] = SequentialStrategy(self.num_sensors)
+        self._strategies[TriggerMode.INTERLEAVED] = InterleavedStrategy(self.num_sensors, self.config.interleaved_groups)
+        self._strategies[TriggerMode.SECTOR] = SectorStrategy(self.num_sensors, self.config.sector_definition, self.config.sector_sequence)
+        self._strategies[TriggerMode.ALL] = AllStrategy(self.num_sensors)
+        self._strategies[TriggerMode.GREEDY] = GreedyStrategy(self.num_sensors)
+        
+        # RL 策略，默认加载最终模型路径
+        model_path = "checkpoints/trigger_rl/ppo_sonar_final.zip"
+        from src.simulator.trigger_strategies import RLStrategy
+        self._strategies[TriggerMode.RL] = RLStrategy(self.num_sensors, model_path)
     
     @property
     def mode(self) -> TriggerMode:
@@ -159,7 +176,8 @@ class TriggerManager:
         """设置触发模式"""
         if value != self._mode:
             self._mode = value
-            self._reset_indices()
+            self._current_strategy = self._strategies[value]
+            self._current_strategy.reset()
     
     def set_mode(self, mode: TriggerMode) -> None:
         """设置触发模式"""
@@ -170,111 +188,63 @@ class TriggerManager:
         self.mode = TriggerMode.from_string(mode_str)
     
     def set_greedy_callback(self, callback: Callable[[], List[int]]) -> None:
-        """设置贪心策略回调函数"""
-        self._greedy_callback = callback
+        """
+        [已弃用] 设置贪心策略回调函数
+        现在贪心策略逻辑已封装在 GreedyStrategy 类中，此方法不再起作用。
+        """
+        pass
     
     def set_random_mode(self, rng: Optional[np.random.Generator] = None) -> TriggerMode:
         """随机选择触发模式"""
         self._mode = self.config.get_random_mode(rng)
-        self._reset_indices()
+        self._current_strategy = self._strategies[self._mode]
+        self._current_strategy.reset()
         self._mode_history.append(self._mode)
         return self._mode
     
-    def _reset_indices(self) -> None:
-        """重置所有索引"""
-        self._sequential_index = 0
-        self._sector_index = 0
-        self._interleaved_group_index = 0
-        self._interleaved_sensor_index = 0
-    
-    def get_active_sensors(self) -> List[int]:
+    def get_active_sensors(self, context: Optional[TriggerContext] = None) -> List[int]:
         """
         获取当前帧应激活的传感器ID列表
         
+        Args:
+            context: 触发上下文，包含传感器读数、机器人位置等信息（Greedy模式需要）
+            
         Returns:
             激活的传感器ID列表
         """
-        if self._mode == TriggerMode.SEQUENTIAL:
-            return [self._sequential_index]
-        
-        elif self._mode == TriggerMode.INTERLEAVED:
-            group = self.config.interleaved_groups[self._interleaved_group_index]
-            return [group[self._interleaved_sensor_index]]
-        
-        elif self._mode == TriggerMode.SECTOR:
-            sector_name = self.config.sector_sequence[self._sector_index]
-            return self.config.sector_definition[sector_name]
-        
-        elif self._mode == TriggerMode.GREEDY:
-            if self._greedy_callback:
-                return self._greedy_callback()
-            else:
-                # 如果没有回调，回退到顺序模式
-                return [self._sequential_index]
-        
-        elif self._mode == TriggerMode.ALL:
-            return list(range(self.num_sensors))
-        
-        else:
-            return [0]  # 默认返回第一个传感器
+        if context is None:
+            context = TriggerContext()
+            
+        return self._current_strategy.get_active_sensors(context)
     
     def advance(self) -> None:
         """前进到下一个触发状态"""
         self._step_count += 1
-        
-        if self._mode == TriggerMode.SEQUENTIAL:
-            self._sequential_index = (self._sequential_index + 1) % self.num_sensors
-        
-        elif self._mode == TriggerMode.INTERLEAVED:
-            self._interleaved_sensor_index += 1
-            group = self.config.interleaved_groups[self._interleaved_group_index]
-            if self._interleaved_sensor_index >= len(group):
-                self._interleaved_sensor_index = 0
-                self._interleaved_group_index = (self._interleaved_group_index + 1) % len(self.config.interleaved_groups)
-        
-        elif self._mode == TriggerMode.SECTOR:
-            self._sector_index = (self._sector_index + 1) % len(self.config.sector_sequence)
-        
-        elif self._mode == TriggerMode.GREEDY:
-            # 贪心模式下，如果回退到顺序模式，需要更新索引
-            if not self._greedy_callback:
-                self._sequential_index = (self._sequential_index + 1) % self.num_sensors
-        
-        # ALL模式不需要前进
+        self._current_strategy.advance()
     
     def get_mode_info(self) -> Dict:
         """获取当前模式的详细信息"""
-        info = {
-            'mode': str(self._mode),
-            'step_count': self._step_count,
-            'active_sensors': self.get_active_sensors(),
-        }
+        info = self._current_strategy.get_info()
+        info['mode'] = str(self._mode)
+        info['step_count'] = self._step_count
+        # 注意：这里没有传入context，可能导致Greedy模式返回fallback
+        # 但这只是为了获取信息，通常没问题
+        info['active_sensors'] = self.get_active_sensors() 
         
+        # 添加描述信息 (为了兼容性)
         if self._mode == TriggerMode.SEQUENTIAL:
             info['description'] = "顺序扫描，每次1个传感器"
-            info['current_index'] = self._sequential_index
-            info['scan_order'] = "0 → 1 → 2 → ... → 11 → 0"
-        
         elif self._mode == TriggerMode.INTERLEAVED:
             info['description'] = "交错扫描，60°间隔"
-            info['current_group'] = self._interleaved_group_index
-            info['current_sensor_in_group'] = self._interleaved_sensor_index
-            info['groups'] = self.config.interleaved_groups
-        
         elif self._mode == TriggerMode.SECTOR:
-            sector_name = self.config.sector_sequence[self._sector_index]
-            info['description'] = f"扇区轮询 ({sector_name})，每次3个传感器"
-            info['current_sector'] = sector_name
-            info['sectors'] = self.config.sector_definition
-        
+            info['description'] = f"扇区轮询，每次3个传感器"
         elif self._mode == TriggerMode.GREEDY:
             info['description'] = "贪心策略，基于信息增益选择传感器"
-            info['has_callback'] = self._greedy_callback is not None
-        
+        elif self._mode == TriggerMode.RL:
+            info['description'] = "强化学习策略，使用训练好的模型决策"
         elif self._mode == TriggerMode.ALL:
             info['description'] = "全部触发"
-            info['warning'] = "此模式在真实环境中会产生严重干扰"
-        
+            
         return info
     
     def reset(self, randomize_mode: bool = False) -> None:
@@ -284,11 +254,15 @@ class TriggerManager:
         Args:
             randomize_mode: 是否随机选择新模式
         """
-        self._reset_indices()
         self._step_count = 0
-        
+        for strategy in self._strategies.values():
+            strategy.reset()
+            
         if randomize_mode:
             self.set_random_mode()
+        else:
+            # 保持当前模式，但重置状态
+            self._current_strategy.reset()
     
     def get_statistics(self) -> Dict:
         """获取统计信息"""
