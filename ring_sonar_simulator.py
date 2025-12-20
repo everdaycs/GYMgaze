@@ -130,8 +130,8 @@ class RingSonarCore:
         self.max_angular_velocity = config.robot.max_angular_velocity
         
         # 传感器触发控制 - 控制何时实际扫描传感器
-        # self.sensor_trigger_interval = max(1, int(config.robot.sensor_trigger_interval)) # 已弃用
-        # self.sensor_trigger_counter = 0  # 已弃用
+        self.sensor_trigger_interval = max(1, int(config.robot.sensor_trigger_interval))
+        self.next_allowed_trigger_time = 0.0
         
         # 传感器就绪时间 (每个传感器下一次可以触发的仿真时间)
         self.sensor_ready_times = np.zeros(self.num_sensors, dtype=np.float64)
@@ -298,6 +298,7 @@ class RingSonarCore:
         self.global_feature_map.fill(0.0)
         self.sonar_readings.fill(self.sensor_max_range)
         self.sensor_ready_times.fill(0.0)
+        self.next_allowed_trigger_time = 0.0
         
         self.crosstalk_count = 0
         self.total_sensor_firings = 0
@@ -509,11 +510,19 @@ class RingSonarCore:
                 all_ready = False
                 break
         
+        # 检查全局触发间隔 (控制扫描频率上限)
+        if self.sim_time < self.next_allowed_trigger_time:
+            all_ready = False
+        
         if not all_ready:
             return  # 等待
             
         # 执行扫描
         active_ids = candidate_ids
+        
+        # 更新全局下一次允许触发的时间
+        # 间隔 = 步数 * dt
+        self.next_allowed_trigger_time = self.sim_time + (self.sensor_trigger_interval * self.dt)
         
         # 扫描激活的传感器
         for sensor_id in active_ids:
