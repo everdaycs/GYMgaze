@@ -45,3 +45,6 @@ nohup.out
 
 # 模型
 *.zip
+
+# Benchmark results
+sensor_strategy_lab/benchmark/

@@ -307,7 +307,7 @@ class RLStrategy(BaseTriggerStrategy):
             return [context.step_count % self.num_sensors]
             
         # 1. 构造与训练时一致的 Observation
-        # 提取局部地图 (40x40)
+        # 提取局部地图 (80x80)
         res = context.feature_map_resolution
         ms = context.global_feature_map.shape[0]
         ww, wh = context.world_dims
@@ -315,11 +315,11 @@ class RLStrategy(BaseTriggerStrategy):
         gx = int(context.robot_pos[0] / res + ms // 2 - ww // (2 * res))
         gy = int(context.robot_pos[1] / res + ms // 2 - wh // (2 * res))
         
-        half_size = 20
+        half_size = 40
         x1, x2 = max(0, gx - half_size), min(ms, gx + half_size)
         y1, y2 = max(0, gy - half_size), min(ms, gy + half_size)
         
-        local_map = np.zeros((40, 40, 1), dtype=np.float32)
+        local_map = np.full((80, 80, 1), 0.5, dtype=np.float32)
         crop = context.global_feature_map[y1:y2, x1:x2]
         h, w = crop.shape
         dy1 = half_size - (gy - y1)

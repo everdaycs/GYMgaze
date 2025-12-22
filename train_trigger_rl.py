@@ -38,7 +38,7 @@ def train():
     # 4. 开始训练
     print("🚀 开始训练 RL 传感器触发策略...")
     model.learn(
-        total_timesteps=200000,
+        total_timesteps=50000,
         callback=checkpoint_callback,
         progress_bar=True
     )

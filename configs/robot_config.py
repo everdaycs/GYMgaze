@@ -35,7 +35,7 @@ class RobotPhysicsConfig:
     
     # ============== 时间参数 ==============
     # 仿真时间步长 (秒)
-    dt: float = 0.05
+    dt: float = 0.01
     
     # 速度变化间隔（步数）
     velocity_change_interval: int = 40

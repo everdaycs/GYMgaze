@@ -511,7 +511,12 @@ class RingSonarCore:
                 break
         
         # 检查全局触发间隔 (控制扫描频率上限)
-        if self.sim_time < self.next_allowed_trigger_time:
+        # 注意：对于 Greedy 和 RL 模式，我们希望尽可能快地触发（由物理 flight_time 驱动）
+        # 因此在这两种模式下，我们忽略 sensor_trigger_interval 的限制
+        current_mode = self.trigger_manager.mode
+        is_async_mode = (str(current_mode) in ['greedy', 'rl'])
+        
+        if not is_async_mode and self.sim_time < self.next_allowed_trigger_time:
             all_ready = False
         
         if not all_ready:
@@ -522,7 +527,9 @@ class RingSonarCore:
         
         # 更新全局下一次允许触发的时间
         # 间隔 = 步数 * dt
-        self.next_allowed_trigger_time = self.sim_time + (self.sensor_trigger_interval * self.dt)
+        # 仅在非异步模式下更新此限制
+        if not is_async_mode:
+            self.next_allowed_trigger_time = self.sim_time + (self.sensor_trigger_interval * self.dt)
         
         # 扫描激活的传感器
         for sensor_id in active_ids:

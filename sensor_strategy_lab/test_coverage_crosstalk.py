@@ -20,21 +20,21 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from ring_sonar_simulator import RingSonarCore
 from src.simulator.trigger import TriggerMode
 
-def run_simulation(strategy_name, steps=1000, seed=2):
+def run_simulation(strategy_name, steps=2000, seed=2):
     """运行单次仿真"""
     print(f"开始测试策略: {strategy_name}")
     
     # 初始化模拟器
     core = RingSonarCore(
-        world_width=20.0,
-        world_height=20.0,
-        pixel_per_meter=20,
+        world_width=40.0,
+        world_height=40.0,
+        pixel_per_meter=10,
         trigger_mode=strategy_name,
         randomize_trigger=False
     )
     
     # 固定地图种子
-    core.reset(regenerate_map=True, seed=seed, scene_type="simple")
+    core.reset(regenerate_map=True, seed=seed, scene_type="corridor")
     
     print(f"  ⚙️ dt={core.dt}, max_range={core.sensor_max_range}, speed_of_sound={core.speed_of_sound}")
     
@@ -48,7 +48,7 @@ def run_simulation(strategy_name, steps=1000, seed=2):
     
     # 运行仿真
     # 预计算移动步长
-    speed = 1.5
+    speed = 1.2
     step_dist = speed * core.dt
     current_angle_rad = 0.0
 
@@ -56,11 +56,10 @@ def run_simulation(strategy_name, steps=1000, seed=2):
         # 记录轨迹
         trajectory.append(core.robot_pos.copy())
 
-        # 1. 生成期望目标点 (改进的 Lissajous 曲线，减少重合)
+        # 1. 生成期望目标点 (改进的 Lissajous 曲线，适应 40x40 地图)
         t = i * 0.05
-        # 使用非比例频率并增加动态相位偏移，防止路径过早闭合
-        target_x = center_pos[0] + 8.5 * math.sin(0.13 * t)
-        target_y = center_pos[1] + 8.5 * math.sin(0.07 * t + i * 0.0005 + math.pi/4)
+        target_x = center_pos[0] + 15.0 * math.sin(0.11 * t)
+        target_y = center_pos[1] + 15.0 * math.sin(0.05 * t + i * 0.0003 + math.pi/4)
         
         # 2. 计算期望移动向量
         dx = target_x - core.robot_pos[0]
@@ -187,8 +186,8 @@ def plot_results(results):
     plt.title("Test Environment & Trajectory")
     plt.xlabel("X (m)")
     plt.ylabel("Y (m)")
-    plt.xlim(0, 20)
-    plt.ylim(0, 20)
+    plt.xlim(0, 40)
+    plt.ylim(0, 40)
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.gca().set_aspect('equal', adjustable='box')
@@ -221,11 +220,21 @@ def plot_results(results):
     print("综合性能图表已保存")
 
 if __name__ == "__main__":
-    strategies = ["sequential", "interleaved", "sector", "greedy"]
+    # 测试所有可用策略
+    strategies = ["sequential", "interleaved", "sector", "greedy", "rl"]
     results = {}
     
+    # 确保目录存在
+    os.makedirs("sensor_strategy_lab", exist_ok=True)
+    
     for s in strategies:
-        results[s] = run_simulation(s, steps=1000)
+        try:
+            results[s] = run_simulation(s, steps=2000)
+        except Exception as e:
+            print(f"❌ 策略 {s} 测试失败: {e}")
         
-    plot_results(results)
-    print("\n🎉 所有测试完成！")
+    if results:
+        plot_results(results)
+        print("\n🎉 所有测试完成！结果已保存至 sensor_strategy_lab/ 目录下。")
+    else:
+        print("❌ 没有成功的测试结果。")
