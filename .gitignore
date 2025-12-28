@@ -18,6 +18,7 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+*.bak
 
 # 项目特定
 fisher_analysis_plots/

@@ -22,8 +22,11 @@ from .trigger import (
     create_demo_trigger_manager
 )
 from .map_generator import DiverseMapGenerator, SimpleMapGenerator
+from .ring_sonar_simulator import RingSonarCore, RingSonarRenderer
 
 __all__ = [
+    "RingSonarCore",
+    "RingSonarRenderer",
     "SonarSensor",
     "TriggerMode",
     "TriggerConfig", 

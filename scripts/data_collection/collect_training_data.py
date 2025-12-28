@@ -18,11 +18,12 @@ from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional
 
 # 添加项目根目录到路径
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_CURRENT_DIR))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from ring_sonar_simulator import RingSonarCore, RingSonarRenderer
+from src.simulator.ring_sonar_simulator import RingSonarCore, RingSonarRenderer
 from configs import (
     SimulationConfig, RobotPhysicsConfig, SensorConfig, WorldConfig,
     DEFAULT_CONFIG, DATA_COLLECTION_CONFIG, print_config

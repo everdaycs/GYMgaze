@@ -3,7 +3,7 @@ import numpy as np
 from gymnasium import spaces
 import cv2
 import math
-from ring_sonar_simulator import RingSonarCore
+from src.simulator.ring_sonar_simulator import RingSonarCore
 
 class SonarTriggerEnv(gym.Env):
     """
@@ -26,25 +26,28 @@ class SonarTriggerEnv(gym.Env):
         self.action_space = spaces.MultiBinary(12)
         
         # 观察空间: 
-        # 1. 局部地图 (80x80, 对应 8m x 8m 区域) - 现在是概率栅格地图
+        # 1. 局部地图 (125x125, 2通道: [占据概率, 扫描陈旧度])
         # 2. 传感器就绪状态 (12维)
         # 3. 传感器上次读数 (12维)
         self.observation_space = spaces.Dict({
-            "local_map": spaces.Box(low=0, high=1, shape=(80, 80, 1), dtype=np.float32),
+            "local_map": spaces.Box(low=0, high=1, shape=(125, 125, 2), dtype=np.float32),
             "sensor_ready": spaces.Box(low=0, high=1, shape=(12,), dtype=np.float32),
             "last_readings": spaces.Box(low=0, high=15, shape=(12,), dtype=np.float32)
         })
         
-        self.max_steps = 1000
+        self.max_steps = 2048
         self.current_step = 0
         
         # 自定义概率栅格地图 (0.5=未知, 0.0=空闲, 1.0=占用)
-        # 尺寸与 core.global_feature_map 保持一致
         self.map_size = self.core.global_feature_map.shape[0]
         self.resolution = self.core.feature_map_resolution
         self.occupancy_map = np.full((self.map_size, self.map_size), 0.5, dtype=np.float32)
         
+        # 新增：扫描陈旧度地图 (0.0=刚刚扫过, 1.0=极度陈旧)
+        self.staleness_map = np.ones((self.map_size, self.map_size), dtype=np.float32)
+        
         self.prev_confident_cells = 0
+        self.prev_total_fisher = 0
 
     def _get_obs(self):
         # 1. 提取局部地图 (以机器人为中心)
@@ -56,21 +59,27 @@ class SonarTriggerEnv(gym.Env):
         gx = int(self.core.robot_pos[0] / res + ms // 2 - ww // (2 * res))
         gy = int(self.core.robot_pos[1] / res + ms // 2 - wh // (2 * res))
         
-        # 裁剪 80x80 区域 (8m x 8m)
-        half_size = 40
-        x1, x2 = max(0, gx - half_size), min(ms, gx + half_size)
-        y1, y2 = max(0, gy - half_size), min(ms, gy + half_size)
+        # 裁剪 125x125 区域
+        half_size = 62
+        x1, x2 = max(0, gx - half_size), min(ms, gx + half_size + 1)
+        y1, y2 = max(0, gy - half_size), min(ms, gy + half_size + 1)
         
-        local_map = np.full((80, 80, 1), 0.5, dtype=np.float32)
-        crop = self.occupancy_map[y1:y2, x1:x2]
+        # 创建双通道局部地图 [Occupancy, Staleness]
+        local_map = np.zeros((125, 125, 2), dtype=np.float32)
+        local_map[:, :, 0] = 0.5 # 默认未知
+        local_map[:, :, 1] = 1.0 # 默认陈旧
         
-        # 填充到 local_map (处理边界情况)
-        h, w = crop.shape
+        crop_occ = self.occupancy_map[y1:y2, x1:x2]
+        crop_stale = self.staleness_map[y1:y2, x1:x2]
+        
+        h, w = crop_occ.shape
         dy1 = half_size - (gy - y1)
         dx1 = half_size - (gx - x1)
-        local_map[dy1:dy1+h, dx1:dx1+w, 0] = crop
         
-        # 2. 传感器就绪状态 (归一化: 0表示就绪, >0表示还需等待的时间)
+        local_map[dy1:dy1+h, dx1:dx1+w, 0] = crop_occ
+        local_map[dy1:dy1+h, dx1:dx1+w, 1] = crop_stale
+        
+        # 2. 传感器就绪状态
         ready_status = np.zeros(12, dtype=np.float32)
         for i in range(12):
             wait_time = max(0, self.core.sensor_ready_times[i] - self.core.sim_time)
@@ -167,6 +176,9 @@ class SonarTriggerEnv(gym.Env):
 
             # 写回
             self.occupancy_map[y_min:y_max, x_min:x_max] = roi_map
+            
+            # 更新陈旧度：被扫描到的区域陈旧度清零
+            self.staleness_map[y_min:y_max, x_min:x_max][mask > 0] = 0.0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -177,10 +189,17 @@ class SonarTriggerEnv(gym.Env):
         
         # 重置概率地图 (0.5 = 未知)
         self.occupancy_map.fill(0.5)
+        # 重置陈旧度地图 (1.0 = 陈旧)
+        self.staleness_map.fill(1.0)
         
         self.current_step = 0
         self.prev_confident_cells = 0
+        self.prev_total_fisher = np.sum(self.core.global_feature_map)
         self.prev_crosstalk = 0
+        
+        # 记录初始中心位置和角度，用于 Lissajous 曲线
+        self.center_pos = self.core.robot_pos.copy()
+        self.current_angle_rad = math.radians(self.core.robot_angle)
         
         return self._get_obs(), {}
 
@@ -194,45 +213,82 @@ class SonarTriggerEnv(gym.Env):
         # 手动调用模拟器的触发处理
         self.core._process_sensor_trigger(triggered_ids)
         
-        # 2. 机器人移动
-        t = self.current_step * 0.05
+        # 2. 机器人移动 (同步 Benchmark 中的智能避障 Lissajous 曲线)
         speed = 1.5
-        vx = speed * math.cos(0.1 * t)
-        vy = speed * math.sin(0.07 * t)
+        step_dist = speed * self.core.dt
         
-        new_pos = self.core.robot_pos + np.array([vx, vy]) * self.core.dt
-        if self.core._position_safe(new_pos):
-            self.core.robot_pos = new_pos
-            self.core.robot_angle = (self.core.robot_angle + 1.0) % 360
+        # 生成期望目标点 (改进的 Lissajous 曲线)
+        # 使用 core.sim_time 确保时间步长与物理引擎完全同步
+        t = self.core.sim_time
+        target_x = self.center_pos[0] + 8.5 * math.sin(0.13 * t)
+        target_y = self.center_pos[1] + 8.5 * math.sin(0.07 * t + self.current_step * 0.0005 + math.pi/4)
+        
+        dx = target_x - self.core.robot_pos[0]
+        dy = target_y - self.core.robot_pos[1]
+        dist = math.hypot(dx, dy)
+        desired_angle = math.atan2(dy, dx) if dist > 0 else self.current_angle_rad
+
+        # 避障移动逻辑：尝试多个角度寻找可行路径
+        final_pos = None
+        angles_to_try = [0]
+        for a in range(1, 13): 
+            angles_to_try.extend([math.radians(a * 15), math.radians(-a * 15)])
+            
+        for angle_offset in angles_to_try:
+            test_angle = desired_angle + angle_offset
+            test_pos = self.core.robot_pos + np.array([math.cos(test_angle) * step_dist, math.sin(test_angle) * step_dist])
+            if self.core._position_safe(test_pos):
+                final_pos = test_pos
+                self.current_angle_rad = test_angle
+                break
+        
+        if final_pos is not None:
+            self.core.robot_pos = final_pos
+            self.core.robot_angle = math.degrees(self.current_angle_rad) % 360
             
         # 3. 物理步进
         self.core.step()
         
-        # 4. 更新自定义概率地图 (替代 Fisher 更新)
-        # 注意：我们使用上一帧触发的传感器读数来更新地图
-        # 实际上 core.step() 后 sonar_readings 已经更新了
-        # 我们需要知道哪些传感器在这一步"完成"了测量并更新了读数
-        # 简化起见，我们假设 triggered_ids 在这一帧立即产生读数 (虽然物理上有延迟)
-        # 或者更准确地，我们应该检查 active_sensors_this_frame
+        # 4. 更新自定义概率地图
         self._update_occupancy_map(list(self.core.active_sensors_this_frame))
         
-        # 5. 计算奖励
-        # 奖励基于"置信度高的栅格数量" (Confident Cells)
-        # 即 p < 0.3 (确信为空) 或 p > 0.7 (确信为障碍)
-        confident_mask = (self.occupancy_map < 0.3) | (self.occupancy_map > 0.7)
-        current_confident_cells = np.count_nonzero(confident_mask)
+        # 5. 更新陈旧度地图 (随时间增加，最大为 1.0)
+        self.staleness_map = np.clip(self.staleness_map + 0.01, 0.0, 1.0)
         
+        # 6. 计算奖励
+        # 奖励 A: 占据栅格覆盖率增益 (基于 Occupancy Grid)
+        confident_mask = (self.occupancy_map < 0.4) | (self.occupancy_map > 0.7)
+        current_confident_cells = np.count_nonzero(confident_mask)
         coverage_gain = current_confident_cells - self.prev_confident_cells
         self.prev_confident_cells = current_confident_cells
         
-        # 串扰惩罚
-        crosstalk_penalty = (self.core.crosstalk_count - self.prev_crosstalk) * 5.0
+        # 奖励 B: Fisher 信息增益 (上帝视角引导，仅训练可用)
+        current_total_fisher = np.sum(self.core.global_feature_map)
+        fisher_gain = current_total_fisher - self.prev_total_fisher
+        self.prev_total_fisher = current_total_fisher
+        
+        # 串扰惩罚 (Crosstalk Penalty)
+        new_crosstalk = self.core.crosstalk_count - self.prev_crosstalk
+        crosstalk_penalty = new_crosstalk * 15.0 
         self.prev_crosstalk = self.core.crosstalk_count
         
-        # 发射惩罚
-        firing_penalty = len(triggered_ids) * 0.1
+        # 基础发射成本 (Base Firing Cost)
+        num_fired = len(triggered_ids)
+        firing_cost = num_fired * 0.2
         
-        reward = (coverage_gain * 0.1) - crosstalk_penalty - firing_penalty
+        # 重复扫描惩罚 (Redundancy Penalty)
+        redundancy_penalty = 0.0
+        if num_fired > 0 and coverage_gain <= 0 and fisher_gain <= 0:
+            redundancy_penalty = 1.5 # 增加惩罚力度
+            
+        # 效率奖励 (Efficiency Bonus)
+        efficiency_bonus = 0.0
+        if num_fired > 0 and (coverage_gain > 0 or fisher_gain > 0):
+            efficiency_bonus = ((coverage_gain + fisher_gain * 0.5) / num_fired) * 2.0
+            
+        # 总奖励：结合占据栅格和 Fisher 信息
+        # Fisher gain 作为一个强力的引导信号
+        reward = (coverage_gain * 10.0) + (fisher_gain * 5.0) + efficiency_bonus - crosstalk_penalty - firing_cost - redundancy_penalty
         
         self.current_step += 1
         terminated = self.current_step >= self.max_steps

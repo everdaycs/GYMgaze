@@ -21,7 +21,7 @@ from typing import List, Dict, Any
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from ring_sonar_simulator import RingSonarCore
+from src.simulator.ring_sonar_simulator import RingSonarCore
 from src.simulator.trigger import TriggerMode
 
 def run_benchmark_episode(strategy_name: str, seed: int, scene_type: str, steps: int = 4000):
@@ -49,7 +49,7 @@ def run_benchmark_episode(strategy_name: str, seed: int, scene_type: str, steps:
         trajectory.append(core.robot_pos.copy())
 
         # 1. 生成期望目标点 (改进的 Lissajous 曲线，减少重合)
-        t = i * 0.05
+        t = core.sim_time
         target_x = center_pos[0] + 8.5 * math.sin(0.13 * t)
         target_y = center_pos[1] + 8.5 * math.sin(0.07 * t + i * 0.0005 + math.pi/4)
         
@@ -169,13 +169,15 @@ def plot_benchmark_summary(df: pd.DataFrame, output_dir: str):
 def main():
     # 测试配置
     strategies = ["sequential", "interleaved", "sector", "greedy", "rl"]
-    scene_types = ["sparse", "simple", "corridor"] # 移除 rooms 场景
-    seeds = [i * 10 for i in range(1, 6)] # 每个场景测试5个种子 (减少总时间，但包含RL)
-    steps = 1000
+    scene_types = ["sparse", "simple", "corridor"] 
+    seeds = [i * 10 for i in range(1, 10)] 
+    steps = 2000
     
     results = []
-    output_dir = "sensor_strategy_lab/benchmark"
-    maps_dir = f"{output_dir}/test_maps"
+    # 使用绝对路径确保保存位置正确
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(base_dir, "benchmark")
+    maps_dir = os.path.join(output_dir, "test_maps")
     os.makedirs(maps_dir, exist_ok=True)
     
     print(f"🧪 开始生成策略基准测试集...")

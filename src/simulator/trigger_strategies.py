@@ -10,6 +10,7 @@ import numpy as np
 import math
 import random
 import os
+import cv2
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Tuple, Any, Optional, Dict
@@ -21,17 +22,20 @@ class TriggerContext:
     """传递给策略的上下文信息"""
     step_count: int = 0
     sim_time: float = 0.0
-    sonar_readings: Optional[np.ndarray] = None
-    robot_pos: Optional[np.ndarray] = None
+    sonar_readings: np.ndarray = field(default_factory=lambda: np.zeros(12))
+    robot_pos: np.ndarray = field(default_factory=lambda: np.zeros(2))
     robot_angle: float = 0.0
     
     # 贪心策略需要的额外信息
     sensors: Optional[List[SonarSensor]] = None
-    sensor_ready_times: Optional[np.ndarray] = None
+    sensor_ready_times: np.ndarray = field(default_factory=lambda: np.zeros(12))
     global_feature_map: Optional[np.ndarray] = None
     feature_map_resolution: float = 0.1
-    world_dims: Tuple[float, float] = (0.0, 0.0) # width, height
+    world_dims: Tuple[float, float] = (20.0, 20.0) # width, height
     sensor_max_range: float = 5.0
+    
+    # RL 策略需要的额外信息
+    active_sensors_last_frame: List[int] = field(default_factory=list)
 
 class BaseTriggerStrategy(ABC):
     """触发策略抽象基类"""
@@ -220,44 +224,19 @@ class GreedyStrategy(BaseTriggerStrategy):
             count = min(len(ready_sensors), self.max_active_sensors)
             return random.sample(ready_sensors, count)
 
-        # 3. 评估每个就绪传感器的"信息需求"
+        # 3. 评估每个就绪传感器的"信息需求" (简化版：不使用 Fisher 信息)
         sensor_scores = []
         
         for sensor_id in ready_sensors:
             reading = context.sonar_readings[sensor_id]
             
-            # 如果没有探测到障碍物（最大量程），优先级较低
             if reading >= context.sensor_max_range * 0.95:
-                # 赋予一个较低的基础分，但允许被选中（用于探索空区域）
-                # 分数越高越好？这里我们用 min_fisher_val 越小越好。
-                # 空区域: score = infinity? 或者一个大常数。
-                score = 1000.0 
+                # 没探测到障碍物，赋予较低优先级
+                score = 100.0 + random.random() * 10.0
             else:
-                # 计算障碍物位置估计
-                sensor = context.sensors[sensor_id]
-                sensor_pos = sensor.get_world_position(context.robot_pos, context.robot_angle)
-                sensor_angle = sensor.get_world_angle(context.robot_angle)
-                angle_rad = math.radians(sensor_angle)
-                
-                wx = sensor_pos[0] + math.cos(angle_rad) * reading
-                wy = sensor_pos[1] + math.sin(angle_rad) * reading
-                
-                # 转换为地图坐标
-                res = context.feature_map_resolution
-                ms = context.global_feature_map.shape[0] # 假设是正方形
-                ww, wh = context.world_dims
-                
-                val = 0.0
-                # 使用传入的 world_dims 计算
-                if ww > 0 and wh > 0:
-                    gx = int(wx / res + ms // 2 - ww // (2 * res))
-                    gy = int(wy / res + ms // 2 - wh // (2 * res))
-                    
-                    if 0 <= gx < ms and 0 <= gy < ms:
-                        val = context.global_feature_map[gy, gx]
-                
-                # Fisher信息越低，不确定性越高，越需要扫描 -> score 越小越好
-                score = val
+                # 探测到障碍物，赋予高优先级。距离越近，优先级越高 (score 越小)
+                # 这是一个纯粹的"障碍物追踪"策略，不考虑该位置是否已被建图
+                score = reading
             
             sensor_scores.append((score, sensor_id))
             
@@ -291,42 +270,139 @@ class RLStrategy(BaseTriggerStrategy):
     def __init__(self, num_sensors: int, model_path: Optional[str] = None):
         super().__init__(num_sensors)
         self.model = None
+        self.vec_normalize = None
+        self.occupancy_map = None
+        self.staleness_map = None
+        self.map_size = 0
+        
         if model_path and os.path.exists(model_path):
+            self.load_model(model_path)
+    
+    def load_model(self, model_path: str):
+        """延迟加载模型和归一化参数"""
+        if os.path.exists(model_path):
             try:
                 from stable_baselines3 import PPO
+                from stable_baselines3.common.vec_env import VecNormalize
+                
                 self.model = PPO.load(model_path)
                 print(f"✅ 成功加载 RL 模型: {model_path}")
-            except ImportError:
-                print("⚠️ 未安装 stable-baselines3，RL 策略将回退到顺序扫描")
+                
+                # 尝试加载归一化参数
+                stats_path = os.path.join(os.path.dirname(model_path), "vec_normalize.pkl")
+                if os.path.exists(stats_path):
+                    # 创建一个具有相同观察空间的 Dummy 环境来加载 stats
+                    from src.rl.trigger_env import SonarTriggerEnv
+                    from stable_baselines3.common.vec_env import DummyVecEnv
+                    dummy_env = DummyVecEnv([lambda: SonarTriggerEnv()])
+                    self.vec_normalize = VecNormalize.load(stats_path, dummy_env)
+                    # 禁用奖励归一化，只保留观察归一化
+                    self.vec_normalize.training = False
+                    self.vec_normalize.norm_reward = False
+                    print(f"✅ 成功加载归一化参数: {stats_path}")
             except Exception as e:
-                print(f"❌ 加载 RL 模型失败: {e}")
-        
-    def get_active_sensors(self, context: TriggerContext) -> List[int]:
-        if self.model is None or context.global_feature_map is None:
-            # 回退逻辑：如果模型没加载，每步发一个
-            return [context.step_count % self.num_sensors]
+                print(f"❌ 加载 RL 模型或归一化参数失败: {e}")
+    
+    def _update_occupancy_map(self, context: TriggerContext):
+        """同步更新内部占据栅格地图"""
+        if context.global_feature_map is None:
+            return
             
-        # 1. 构造与训练时一致的 Observation
-        # 提取局部地图 (80x80)
+        if self.occupancy_map is None:
+            # 初始化地图 (0.5 = 未知)
+            self.map_size = context.global_feature_map.shape[0]
+            self.occupancy_map = np.full((self.map_size, self.map_size), 0.5, dtype=np.float32)
+            self.staleness_map = np.ones((self.map_size, self.map_size), dtype=np.float32)
+            
+        # 更新陈旧度 (随时间增加)
+        self.staleness_map = np.clip(self.staleness_map + 0.01, 0.0, 1.0)
+
+        if not context.active_sensors_last_frame:
+            return
+
         res = context.feature_map_resolution
-        ms = context.global_feature_map.shape[0]
+        ms = self.map_size
+        ww, wh = context.world_dims
+        center_offset_x = ms // 2 - ww // (2 * res)
+        center_offset_y = ms // 2 - wh // (2 * res)
+
+        for sensor_id in context.active_sensors_last_frame:
+            reading = context.sonar_readings[sensor_id]
+            sensor = context.sensors[sensor_id]
+            
+            s_pos = sensor.get_world_position(context.robot_pos, context.robot_angle)
+            s_angle = sensor.get_world_angle(context.robot_angle)
+            
+            sx_pix = int(s_pos[0] / res + center_offset_x)
+            sy_pix = int(s_pos[1] / res + center_offset_y)
+            
+            start_angle = s_angle - sensor.fov_angle / 2
+            end_angle = s_angle + sensor.fov_angle / 2
+            reading_pix = int(reading / res)
+            
+            # 限制范围
+            roi_radius = reading_pix + 5
+            x_min, x_max = max(0, sx_pix - roi_radius), min(ms, sx_pix + roi_radius)
+            y_min, y_max = max(0, sy_pix - roi_radius), min(ms, sy_pix + roi_radius)
+            
+            if x_max <= x_min or y_max <= y_min: continue
+            
+            roi_map = self.occupancy_map[y_min:y_max, x_min:x_max]
+            rel_sx, rel_sy = sx_pix - x_min, sy_pix - y_min
+            
+            # 更新空闲区域
+            mask_free = np.zeros_like(roi_map, dtype=np.uint8)
+            cv2.ellipse(mask_free, (rel_sx, rel_sy), (reading_pix, reading_pix), 0, start_angle, end_angle, 255, -1)
+            roi_map[mask_free > 0] = np.clip(roi_map[mask_free > 0] - 0.05, 0.0, 1.0)
+            
+            # 更新占用区域
+            if reading < context.sensor_max_range * 0.95:
+                mask_occ = np.zeros_like(roi_map, dtype=np.uint8)
+                cv2.ellipse(mask_occ, (rel_sx, rel_sy), (reading_pix, reading_pix), 0, start_angle, end_angle, 255, 3)
+                roi_map[mask_occ > 0] = np.clip(roi_map[mask_occ > 0] + 0.15, 0.0, 1.0)
+            
+            self.occupancy_map[y_min:y_max, x_min:x_max] = roi_map
+            # 更新陈旧度
+            self.staleness_map[y_min:y_max, x_min:x_max][mask_free > 0] = 0.0
+
+    def get_active_sensors(self, context: TriggerContext) -> List[int]:
+        if self.model is None:
+            return []
+            
+        # 1. 更新内部占据地图
+        self._update_occupancy_map(context)
+        
+        # 如果地图尚未初始化或机器人位置缺失，返回空列表
+        if self.occupancy_map is None or context.robot_pos is None:
+            return []
+            
+        # 2. 构造 Observation
+        res = context.feature_map_resolution
+        ms = self.map_size
         ww, wh = context.world_dims
         
         gx = int(context.robot_pos[0] / res + ms // 2 - ww // (2 * res))
         gy = int(context.robot_pos[1] / res + ms // 2 - wh // (2 * res))
         
-        half_size = 40
-        x1, x2 = max(0, gx - half_size), min(ms, gx + half_size)
-        y1, y2 = max(0, gy - half_size), min(ms, gy + half_size)
+        # 裁剪 125x125 区域 (12.5m x 12.5m)，匹配传感器最大量程
+        half_size = 62
+        x1, x2 = max(0, gx - half_size), min(ms, gx + half_size + 1)
+        y1, y2 = max(0, gy - half_size), min(ms, gy + half_size + 1)
         
-        local_map = np.full((80, 80, 1), 0.5, dtype=np.float32)
-        crop = context.global_feature_map[y1:y2, x1:x2]
-        h, w = crop.shape
+        local_map = np.zeros((125, 125, 2), dtype=np.float32)
+        local_map[:, :, 0] = 0.5
+        local_map[:, :, 1] = 1.0
+        
+        crop_occ = self.occupancy_map[y1:y2, x1:x2]
+        crop_stale = self.staleness_map[y1:y2, x1:x2]
+        
+        h, w = crop_occ.shape
         dy1 = half_size - (gy - y1)
         dx1 = half_size - (gx - x1)
-        local_map[dy1:dy1+h, dx1:dx1+w, 0] = crop
         
-        # 传感器状态
+        local_map[dy1:dy1+h, dx1:dx1+w, 0] = crop_occ
+        local_map[dy1:dy1+h, dx1:dx1+w, 1] = crop_stale
+        
         ready_status = np.zeros(12, dtype=np.float32)
         for i in range(12):
             wait_time = max(0, context.sensor_ready_times[i] - context.sim_time)
@@ -338,21 +414,37 @@ class RLStrategy(BaseTriggerStrategy):
             "last_readings": context.sonar_readings.astype(np.float32)
         }
         
-        # 2. 模型预测
+        # 3. 应用归一化并增加 Batch 维度
+        if self.vec_normalize is not None:
+            # VecNormalize.normalize_obs 内部会处理单样本或 Batch
+            obs = self.vec_normalize.normalize_obs(obs)
+        else:
+            # 如果没有归一化器，手动增加维度以符合 SB3 期望
+            obs = {k: np.expand_dims(v, 0) for k, v in obs.items()}
+        
+        # 4. 模型预测
         action, _ = self.model.predict(obs, deterministic=True)
         
-        # 3. 转换动作为 ID 列表
+        # 如果返回的是 Batch 结果 (1, 12)，取第一个 (12,)
+        if len(action.shape) > 1:
+            action = action[0]
+        
         triggered_ids = []
         for i in range(12):
-            if action[i] == 1 and context.sim_time >= context.sensor_ready_times[i]:
+            # 只要模型想触发 (action[i]==1)，我们就返回它
+            # 具体的就绪检查由模拟器核心执行，这样可以支持异步触发
+            if action[i] == 1:
                 triggered_ids.append(i)
                 
         return triggered_ids
+    
+    def reset(self) -> None:
+        if self.occupancy_map is not None:
+            self.occupancy_map.fill(0.5)
+        if self.staleness_map is not None:
+            self.staleness_map.fill(1.0)
         
     def advance(self) -> None:
-        pass
-        
-    def reset(self) -> None:
         pass
         
     def get_info(self) -> dict:

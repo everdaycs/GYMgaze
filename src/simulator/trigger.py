@@ -27,6 +27,7 @@
 
 import random
 import numpy as np
+import os
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable
@@ -45,6 +46,7 @@ class TriggerMode(Enum):
     ALL = "all"                    # 全部触发（仅仿真用）
     GREEDY = "greedy"              # 贪心策略：基于外部提供的价值函数选择
     RL = "rl"                      # 强化学习策略：使用训练好的模型决策
+    MANUAL = "manual"              # 手动模式：由外部环境直接控制触发
     
     @classmethod
     def from_string(cls, mode_str: str) -> 'TriggerMode':
@@ -55,7 +57,8 @@ class TriggerMode(Enum):
             'sector': cls.SECTOR,
             'all': cls.ALL,
             'greedy': cls.GREEDY,
-            'rl': cls.RL
+            'rl': cls.RL,
+            'manual': cls.MANUAL
         }
         return mode_map.get(mode_str.lower(), cls.SEQUENTIAL)
     
@@ -142,12 +145,11 @@ class TriggerManager:
         self._init_strategies()
         
         # 当前模式
-        if initial_mode is not None:
-            self._mode = initial_mode
-        else:
-            self._mode = TriggerMode.SEQUENTIAL
-            
+        self._mode = TriggerMode.SEQUENTIAL # 默认值
         self._current_strategy = self._strategies[self._mode]
+        
+        if initial_mode is not None:
+            self.mode = initial_mode # 使用 setter 以触发模型加载逻辑
         
         # 统计信息
         self._step_count = 0
@@ -160,11 +162,11 @@ class TriggerManager:
         self._strategies[TriggerMode.SECTOR] = SectorStrategy(self.num_sensors, self.config.sector_definition, self.config.sector_sequence)
         self._strategies[TriggerMode.ALL] = AllStrategy(self.num_sensors)
         self._strategies[TriggerMode.GREEDY] = GreedyStrategy(self.num_sensors)
+        self._strategies[TriggerMode.MANUAL] = SequentialStrategy(self.num_sensors) # 手动模式占位
         
-        # RL 策略，默认加载最终模型路径
-        model_path = "checkpoints/trigger_rl/ppo_sonar_final.zip"
+        # RL 策略：初始时不加载模型，仅创建实例
         from src.simulator.trigger_strategies import RLStrategy
-        self._strategies[TriggerMode.RL] = RLStrategy(self.num_sensors, model_path)
+        self._strategies[TriggerMode.RL] = RLStrategy(self.num_sensors, model_path=None)
     
     @property
     def mode(self) -> TriggerMode:
@@ -177,6 +179,23 @@ class TriggerManager:
         if value != self._mode:
             self._mode = value
             self._current_strategy = self._strategies[value]
+            
+            # 如果切换到 RL 模式且模型尚未加载，则进行加载
+            if value == TriggerMode.RL:
+                from src.simulator.trigger_strategies import RLStrategy
+                strategy = self._strategies[value]
+                if isinstance(strategy, RLStrategy) and strategy.model is None:
+                    # 优先加载最终模型，如果不存在则尝试加载最新的 checkpoint
+                    model_path = "checkpoints/trigger_rl/ppo_sonar_final.zip"
+                    if not os.path.exists(model_path):
+                        # 尝试加载一个已知的 checkpoint
+                        model_path = "checkpoints/trigger_rl/ppo_sonar_10720000_steps.zip"
+                    
+                    if os.path.exists(model_path):
+                        strategy.load_model(model_path)
+                    else:
+                        print(f"⚠️ 警告: 找不到 RL 模型文件 {model_path}")
+            
             self._current_strategy.reset()
     
     def set_mode(self, mode: TriggerMode) -> None:
@@ -237,11 +256,13 @@ class TriggerManager:
         elif self._mode == TriggerMode.INTERLEAVED:
             info['description'] = "交错扫描，60°间隔"
         elif self._mode == TriggerMode.SECTOR:
-            info['description'] = f"扇区轮询，每次3个传感器"
+            info['description'] = f"扇区轮询"
         elif self._mode == TriggerMode.GREEDY:
-            info['description'] = "贪心策略，基于信息增益选择传感器"
+            info['description'] = "贪心策略"
         elif self._mode == TriggerMode.RL:
-            info['description'] = "强化学习策略，使用训练好的模型决策"
+            info['description'] = "强"
+        elif self._mode == TriggerMode.MANUAL:
+            info['description'] = "手动控制模式"
         elif self._mode == TriggerMode.ALL:
             info['description'] = "全部触发"
             

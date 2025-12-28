@@ -17,7 +17,7 @@ import time
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from ring_sonar_simulator import RingSonarCore
+from src.simulator.ring_sonar_simulator import RingSonarCore
 from src.simulator.trigger import TriggerMode
 
 def run_simulation(strategy_name, steps=2000, seed=2):

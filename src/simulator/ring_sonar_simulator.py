@@ -25,7 +25,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # 添加项目根目录到路径
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_CURRENT_DIR))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
@@ -303,6 +304,10 @@ class RingSonarCore:
         self.crosstalk_count = 0
         self.total_sensor_firings = 0
         
+        # 重置触发管理器
+        if hasattr(self, 'trigger_manager'):
+            self.trigger_manager.reset()
+        
         self._collision_occurred = False
         self._stuck_counter = 0
         self.step_counter = 0
@@ -502,14 +507,12 @@ class RingSonarCore:
         if not candidate_ids:
             return
             
-        # 检查所有候选传感器是否都已就绪
-        # 只有当所有候选者都准备好时才触发 (保持策略的同步性)
-        all_ready = True
-        for sensor_id in candidate_ids:
-            if self.sim_time < self.sensor_ready_times[sensor_id]:
-                all_ready = False
-                break
+        # 检查哪些候选传感器已就绪
+        active_ids = [sid for sid in candidate_ids if self.sim_time >= self.sensor_ready_times[sid]]
         
+        if not active_ids:
+            return
+            
         # 检查全局触发间隔 (控制扫描频率上限)
         # 注意：对于 Greedy 和 RL 模式，我们希望尽可能快地触发（由物理 flight_time 驱动）
         # 因此在这两种模式下，我们忽略 sensor_trigger_interval 的限制
@@ -517,14 +520,9 @@ class RingSonarCore:
         is_async_mode = (str(current_mode) in ['greedy', 'rl'])
         
         if not is_async_mode and self.sim_time < self.next_allowed_trigger_time:
-            all_ready = False
-        
-        if not all_ready:
-            return  # 等待
+            return # 等待全局间隔
             
         # 执行扫描
-        active_ids = candidate_ids
-        
         # 更新全局下一次允许触发的时间
         # 间隔 = 步数 * dt
         # 仅在非异步模式下更新此限制
