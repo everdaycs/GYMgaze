@@ -170,8 +170,8 @@ def main():
     # 测试配置
     strategies = ["sequential", "interleaved", "sector", "greedy", "rl"]
     scene_types = ["sparse", "simple", "corridor"] 
-    seeds = [i * 10 for i in range(1, 10)] 
-    steps = 2000
+    seeds = [i * 10 for i in range(1, 5)] 
+    steps = 2048
     
     results = []
     # 使用绝对路径确保保存位置正确

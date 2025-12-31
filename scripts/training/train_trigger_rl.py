@@ -36,26 +36,27 @@ def train():
         env,
         verbose=1,
         learning_rate=3e-4,
-        n_steps=2048,   # 每个环境收集的步数 (总 buffer = n_steps * n_envs)
-        batch_size=512, # 增加批量大小以利用更多数据
+        n_steps=2048,   # 每个环境收集的步数
+        batch_size=512,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
+        ent_coef=0.01,  # 新增：熵正则化系数，防止因高惩罚导致策略"不敢发射"
         tensorboard_log="./logs/trigger_rl/"
     )
 
     # 3. 设置回调
     checkpoint_callback = CheckpointCallback(
-        save_freq=10000,
+        save_freq=1000,
         save_path="./checkpoints/trigger_rl/",
         name_prefix="ppo_sonar"
     )
 
     # 4. 开始训练
-    print("🚀 开始训练 RL 传感器触发策略...")
+    print("🏋️‍♂️ 开始训练模型...")
     model.learn(
-        total_timesteps=300000,
+        total_timesteps=250000, 
         callback=checkpoint_callback,
         progress_bar=True
     )
@@ -64,7 +65,7 @@ def train():
     model_path = "checkpoints/trigger_rl/ppo_sonar_final"
     model.save(model_path)
     env.save("checkpoints/trigger_rl/vec_normalize.pkl")
-    print(f"✅ 训练完成！模型已保存至: {model_path}")
+    print(f"训练完成, 模型已保存至: {model_path}")
 
 if __name__ == "__main__":
     # 确保目录存在

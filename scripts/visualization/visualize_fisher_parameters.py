@@ -113,8 +113,10 @@ def visualize_fisher_parameters():
     ax.legend(fontsize=9, loc='upper right')
     
     plt.tight_layout()
-    plt.savefig('/home/kaga/GYMgaze/docs/fisher_parameters_visualization.png', dpi=150)
-    print("✅ 可视化已保存到: docs/fisher_parameters_visualization.png")
+    # 使用相对路径保存
+    save_path = os.path.join(os.path.dirname(__file__), "../../docs/fisher_parameters_visualization.png")
+    plt.savefig(save_path, dpi=150)
+    print(f"✅ 可视化已保存到: {save_path}")
     plt.show()
 
 

@@ -274,6 +274,8 @@ class RLStrategy(BaseTriggerStrategy):
         self.occupancy_map = None
         self.staleness_map = None
         self.map_size = 0
+        self.stack_size = 3
+        self.obs_history = []
         
         if model_path and os.path.exists(model_path):
             self.load_model(model_path)
@@ -408,22 +410,38 @@ class RLStrategy(BaseTriggerStrategy):
             wait_time = max(0, context.sensor_ready_times[i] - context.sim_time)
             ready_status[i] = min(1.0, wait_time / 0.1)
             
-        obs = {
+        obs_current = {
             "local_map": local_map,
             "sensor_ready": ready_status,
             "last_readings": context.sonar_readings.astype(np.float32)
         }
         
-        # 3. 应用归一化并增加 Batch 维度
-        if self.vec_normalize is not None:
-            # VecNormalize.normalize_obs 内部会处理单样本或 Batch
-            obs = self.vec_normalize.normalize_obs(obs)
+        # 3. 更新历史记录并堆叠
+        if not self.obs_history:
+            for _ in range(self.stack_size):
+                self.obs_history.append(obs_current)
         else:
-            # 如果没有归一化器，手动增加维度以符合 SB3 期望
-            obs = {k: np.expand_dims(v, 0) for k, v in obs.items()}
+            self.obs_history.pop(0)
+            self.obs_history.append(obs_current)
+            
+        stacked_local_map = np.concatenate([o["local_map"] for o in self.obs_history], axis=-1)
+        stacked_ready = np.concatenate([o["sensor_ready"] for o in self.obs_history], axis=0)
+        stacked_readings = np.concatenate([o["last_readings"] for o in self.obs_history], axis=0)
         
-        # 4. 模型预测
-        action, _ = self.model.predict(obs, deterministic=True)
+        obs_stacked = {
+            "local_map": stacked_local_map,
+            "sensor_ready": stacked_ready,
+            "last_readings": stacked_readings
+        }
+        
+        # 4. 应用归一化并增加 Batch 维度
+        if self.vec_normalize is not None:
+            obs_final = self.vec_normalize.normalize_obs(obs_stacked)
+        else:
+            obs_final = {k: np.expand_dims(v, 0) for k, v in obs_stacked.items()}
+        
+        # 5. 模型预测
+        action, _ = self.model.predict(obs_final, deterministic=True)
         
         # 如果返回的是 Batch 结果 (1, 12)，取第一个 (12,)
         if len(action.shape) > 1:
@@ -431,8 +449,6 @@ class RLStrategy(BaseTriggerStrategy):
         
         triggered_ids = []
         for i in range(12):
-            # 只要模型想触发 (action[i]==1)，我们就返回它
-            # 具体的就绪检查由模拟器核心执行，这样可以支持异步触发
             if action[i] == 1:
                 triggered_ids.append(i)
                 
@@ -443,8 +459,10 @@ class RLStrategy(BaseTriggerStrategy):
             self.occupancy_map.fill(0.5)
         if self.staleness_map is not None:
             self.staleness_map.fill(1.0)
+        self.obs_history = []
         
     def advance(self) -> None:
+        """RL 策略的状态更新在 get_active_sensors 中完成，此处无需操作"""
         pass
         
     def get_info(self) -> dict:
