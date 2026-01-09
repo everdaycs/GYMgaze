@@ -70,7 +70,7 @@ class GlobalMapDataCollector:
             world_height=config.world.world_height
         )
 
-    def collect_episode(self, episode_id: int, max_steps: int = 500) -> Dict:
+    def collect_episode(self, episode_id: int, max_steps: int = 2000) -> Dict:
         """收集一个episode的全局地图数据"""
         
         # 创建环境（使用配置，根据参数设置触发模式）
@@ -353,7 +353,7 @@ def main():
     parser = argparse.ArgumentParser(description='收集全局地图预测训练数据（增强版）')
     parser.add_argument('--episodes', type=int, default=10000,
                        help='收集的episode数量')
-    parser.add_argument('--max-steps', type=int, default=200,
+    parser.add_argument('--max-steps', type=int, default=2000,
                        help='每个episode的最大步数（更多步数因为dt更小）')
     parser.add_argument('--data-dir', type=str, default='./data/global_map_training_data',
                        help='数据保存目录')

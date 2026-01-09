@@ -230,12 +230,11 @@ class GreedyStrategy(BaseTriggerStrategy):
         for sensor_id in ready_sensors:
             reading = context.sonar_readings[sensor_id]
             
-            if reading >= context.sensor_max_range * 0.95:
-                # 没探测到障碍物，赋予较低优先级
+            if reading <= 0 or reading >= context.sensor_max_range * 0.95:
+                # 无效回波或没探测到障碍物，赋予较低优先级
                 score = 100.0 + random.random() * 10.0
             else:
-                # 探测到障碍物，赋予高优先级。距离越近，优先级越高 (score 越小)
-                # 这是一个纯粹的"障碍物追踪"策略，不考虑该位置是否已被建图
+                # 探测到有效障碍物，赋予高优先级。距离越近，优先级越高 (score 越小)
                 score = reading
             
             sensor_scores.append((score, sensor_id))
@@ -409,11 +408,38 @@ class RLStrategy(BaseTriggerStrategy):
         for i in range(12):
             wait_time = max(0, context.sensor_ready_times[i] - context.sim_time)
             ready_status[i] = min(1.0, wait_time / 0.1)
+        
+        # 3.5 Sector Proposal for RL
+        # 使用 SectorStrategy 作为底层建议生成器
+        if not hasattr(self, '_internal_sector'):
+            self._internal_sector = SectorStrategy(self.num_sensors)
+            
+        # RL 调用时不应该推进 Sector 的内部状态，所以我们需要小心
+        # 但 Sector 实际上依赖于 advance() 来切换扇区。
+        # 为了保证训练时的行为一致性，我们在这里只需获取当前活跃的扇区。
+        # 注意：在 simulator 中，env.step() 会调用 advance()。
+        # 在这里我们只是做 inference，所以可以直接获取。
+        # 如果是纯推理模式（非Gym环境），外部循环需要负责调用 advance()。
+        
+        # 更好的做法可能是从 context 获取 step count 并计算？
+        # 或者直接复用一个 state。由于 RLStrategy 本身不维护 sector index，
+        # 我们这里简单地使用一个内部实例，但要确保它与外部保持同步可能很难。
+        # 暂时方案：每次 random.choice 一个扇区？或者顺序？
+        # 考虑到 RL 是逐帧运行的，我们可以简单地维护一个 index。
+        
+        sector_ids = self._internal_sector.get_active_sensors(context)
+        # 每次调用自动推进，模拟持续扫描的效果
+        self._internal_sector.advance()
+        
+        proposal_vec = np.zeros(12, dtype=np.float32)
+        if sector_ids:
+            proposal_vec[sector_ids] = 1.0
             
         obs_current = {
             "local_map": local_map,
             "sensor_ready": ready_status,
-            "last_readings": context.sonar_readings.astype(np.float32)
+            "last_readings": context.sonar_readings.astype(np.float32),
+            "greedy_proposal": proposal_vec # 保持 Key 名与訓練时一致
         }
         
         # 3. 更新历史记录并堆叠
@@ -427,11 +453,14 @@ class RLStrategy(BaseTriggerStrategy):
         stacked_local_map = np.concatenate([o["local_map"] for o in self.obs_history], axis=-1)
         stacked_ready = np.concatenate([o["sensor_ready"] for o in self.obs_history], axis=0)
         stacked_readings = np.concatenate([o["last_readings"] for o in self.obs_history], axis=0)
+        # Proposal 不需要堆叠，只取当前的
+        current_proposal = obs_current["greedy_proposal"]
         
         obs_stacked = {
             "local_map": stacked_local_map,
             "sensor_ready": stacked_ready,
-            "last_readings": stacked_readings
+            "last_readings": stacked_readings,
+            "greedy_proposal": current_proposal
         }
         
         # 4. 应用归一化并增加 Batch 维度
@@ -447,9 +476,15 @@ class RLStrategy(BaseTriggerStrategy):
         if len(action.shape) > 1:
             action = action[0]
         
+        # 关键：移除 Sector 过滤器，与训练环境保持一致
+        # 允许 RL 自由决定是否触发任意传感器
+        final_action = action # * current_proposal
+        
         triggered_ids = []
         for i in range(12):
-            if action[i] == 1:
+            # 同时检查物理就绪状态，确保策略合理
+            is_phys_ready = context.sim_time >= context.sensor_ready_times[i]
+            if final_action[i] > 0.5 and is_phys_ready:
                 triggered_ids.append(i)
                 
         return triggered_ids

@@ -603,8 +603,8 @@ class RingSonarCore:
             sensor = self.sensors[sensor_id]
             distance = self.sonar_readings[sensor.id]
             
-            # 如果检测到障碍物（距离小于最大范围）
-            if distance < sensor.max_range:
+            # 如果检测到障碍物（距离在有效范围内且未受串扰污染）
+            if 0 < distance < sensor.max_range:
                 # 获取传感器世界位置和朝向
                 sensor_pos = sensor.get_world_position(self.robot_pos, self.robot_angle)
                 sensor_angle = sensor.get_world_angle(self.robot_angle)
@@ -766,8 +766,8 @@ class RingSonarCore:
                     if getattr(self, "raise_on_crosstalk", False):
                         raise RuntimeError(msg)
 
-                    # 最后才真正覆盖受害传感器的读数
-                    self.sonar_readings[victim_id] = total_path_length
+                    # 将读数标记为无效值 (-1.0)，表示数据因串扰而损坏
+                    self.sonar_readings[victim_id] = -1.0
 
     def _register_reflection_events(self, active_ids: List[int]) -> None:
         """为本帧所有激活的传感器登记反射事件（只记录几何+时间，不立刻做串扰）"""

@@ -4,12 +4,13 @@ from gymnasium import spaces
 import cv2
 import math
 from src.simulator.ring_sonar_simulator import RingSonarCore
+from src.simulator.trigger_strategies import SectorStrategy, TriggerContext
 
 class SonarTriggerEnv(gym.Env):
     """
     专门用于训练传感器触发策略的 Gymnasium 环境
     
-    修改版：不使用 Fisher 信息，而是模拟真实的低分辨率超声波栅格地图 (Occupancy Grid Map)。
+    修改版：以 Sector 策略为基础，RL 作为其高级过滤器和调度器。
     """
     def __init__(self, render_mode=None):
         super(SonarTriggerEnv, self).__init__()
@@ -22,6 +23,11 @@ class SonarTriggerEnv(gym.Env):
             randomize_trigger=False
         )
         
+        # 辅助 Sector 策略 (用于产生 Proposal)
+        # 初始化 Sector 策略
+        self.sector_helper = SectorStrategy(num_sensors=12)
+        self.last_proposal = np.zeros(12, dtype=np.float32)
+        
         # 动作空间: 12个传感器的二进制触发 (0: 不触发, 1: 触发)
         self.action_space = spaces.MultiBinary(12)
         
@@ -32,13 +38,15 @@ class SonarTriggerEnv(gym.Env):
         # 1. 局部地图 (125x125, 2通道 * 3帧 = 6通道)
         # 2. 传感器就绪状态 (12维 * 3帧 = 36维)
         # 3. 传感器上次读数 (12维 * 3帧 = 36维)
+        # 4. Sector 建议 (12维)
         self.observation_space = spaces.Dict({
             "local_map": spaces.Box(low=0, high=1, shape=(125, 125, 2 * self.stack_size), dtype=np.float32),
             "sensor_ready": spaces.Box(low=0, high=1, shape=(12 * self.stack_size,), dtype=np.float32),
-            "last_readings": spaces.Box(low=0, high=15, shape=(12 * self.stack_size,), dtype=np.float32)
+            "last_readings": spaces.Box(low=-1.0, high=15.0, shape=(12 * self.stack_size,), dtype=np.float32),
+            "greedy_proposal": spaces.Box(low=0, high=1, shape=(12,), dtype=np.float32) # key 保持不变以便兼容，实际含义变为 sector_proposal
         })
         
-        self.max_steps = 2048
+        self.max_steps = 1024
         self.current_step = 0
         
         # 自定义概率栅格地图 (0.5=未知, 0.0=空闲, 1.0=占用)
@@ -52,7 +60,7 @@ class SonarTriggerEnv(gym.Env):
         # 历史记录缓存
         self.obs_history = []
         
-        self.prev_confident_cells = 0
+        self.prev_fisher_coverage = 0
         self.prev_soft_coverage = 0
         self.prev_total_fisher = 0
         self.consecutive_trigger_counts = np.zeros(12, dtype=np.int32)
@@ -87,32 +95,40 @@ class SonarTriggerEnv(gym.Env):
         
         # 2. 传感器就绪状态
         current_ready = np.zeros(12, dtype=np.float32)
-        inhibition_window = 0.03 # 30ms 抑制窗口 (覆盖最大飞行时间，防止串扰)
         
         for i in range(12):
-            # A. 物理就绪时间 (等待回波)
+            # 物理就绪时间 (等待回波)
             phys_wait = max(0, self.core.sensor_ready_times[i] - self.core.sim_time)
-            
-            # B. 空间抑制 (检查邻居是否刚发射)
-            # 邻居: i-1, i+1 (循环)
-            neighbors = [(i-1)%12, (i+1)%12]
-            neighbor_wait = 0.0
-            for n_id in neighbors:
-                time_since_fire = self.core.sim_time - self.last_fire_times[n_id]
-                if time_since_fire < inhibition_window:
-                    # 如果邻居刚发射，我也要等，直到它的脉冲飞远
-                    neighbor_wait = max(neighbor_wait, inhibition_window - time_since_fire)
-            
-            total_wait = max(phys_wait, neighbor_wait)
-            current_ready[i] = min(1.0, total_wait / 0.1)
+            current_ready[i] = min(1.0, phys_wait / 0.1)
             
         # 3. 上次读数
         current_readings = self.core.sonar_readings.astype(np.float32)
         
+        # 3.5 计算 Sector 建议 (替代原 Greedy)
+        context = TriggerContext(
+            step_count=self.core.step_counter,
+            sim_time=self.core.sim_time,
+            sonar_readings=self.core.sonar_readings,
+            robot_pos=self.core.robot_pos,
+            robot_angle=self.core.robot_angle,
+            sensors=self.core.sensors,
+            sensor_ready_times=self.core.sensor_ready_times,
+            global_feature_map=self.core.global_feature_map,
+            sensor_max_range=self.core.sensor_max_range,
+            world_dims=(self.core.world_width, self.core.world_height)
+        )
+        # 获取 Sector 建议 (通常是3个传感器)
+        proposal_ids = self.sector_helper.get_active_sensors(context)
+        proposal_vec = np.zeros(12, dtype=np.float32)
+        if proposal_ids:
+            proposal_vec[proposal_ids] = 1.0
+        self.last_proposal = proposal_vec.copy()
+
         # 4. 更新历史记录并堆叠
         current_obs = {
             "local_map": current_local_map,
             "sensor_ready": current_ready,
+            "greedy_proposal": proposal_vec, # Key 保持不变
             "last_readings": current_readings
         }
         
@@ -131,7 +147,8 @@ class SonarTriggerEnv(gym.Env):
         return {
             "local_map": stacked_local_map,
             "sensor_ready": stacked_ready,
-            "last_readings": stacked_readings
+            "last_readings": stacked_readings,
+            "greedy_proposal": proposal_vec
         }
 
     def _update_occupancy_map(self, triggered_ids):
@@ -151,6 +168,11 @@ class SonarTriggerEnv(gym.Env):
 
         for sensor_id in triggered_ids:
             reading = self.core.sonar_readings[sensor_id]
+            
+            # 如果读数为无效 (发生串扰)，则跳过更新地图，但发射成本已扣除
+            if reading <= 0:
+                continue
+
             sensor = self.core.sensors[sensor_id]
             
             # 获取传感器世界位置和角度
@@ -232,10 +254,13 @@ class SonarTriggerEnv(gym.Env):
         # 重置陈旧度地图 (1.0 = 陈旧)
         self.staleness_map.fill(1.0)
         
+        self.greedy_helper = None # 已废弃
+        self.sector_helper.reset()
+        
         self.current_step = 0
         self.obs_history = []
         
-        self.prev_confident_cells = 0
+        self.prev_fisher_coverage = np.count_nonzero(self.core.global_feature_map > 0.1)
         # 初始软覆盖率 (偏离 0.5 的程度)
         self.prev_soft_coverage = np.sum(np.abs(self.occupancy_map - 0.5))
         self.prev_total_fisher = np.sum(self.core.global_feature_map)
@@ -249,36 +274,23 @@ class SonarTriggerEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
-        # 1. 执行动作 (触发选中的传感器)
+        # 1. 准备动作 (计算触发ID列表)
         triggered_ids = []
-        inhibition_window = 0.03 # 30ms 抑制窗口
-        
-        # 为了防止同一步内的冲突，我们先确定哪些可以发射
-        # 注意：这里简单的逻辑是按索引顺序优先。如果0发射，1就被抑制。
-        # 这实际上模仿了 Sector 的"互斥"特性。
+        # Masking: 移除 Sector 限制，允许 RL 探索触发所有传感器
+        # 这里的 action 是 RL 自由决定的
+        masked_action = action # * self.last_proposal (不再使用 Proposal 掩码)
         
         for i in range(12):
-            # A. 物理就绪
+            # 物理就绪
             is_phys_ready = self.core.sim_time >= self.core.sensor_ready_times[i]
             
-            # B. 空间抑制
-            neighbors = [(i-1)%12, (i+1)%12]
-            is_inhibited = False
-            for n_id in neighbors:
-                if self.core.sim_time - self.last_fire_times[n_id] < inhibition_window:
-                    is_inhibited = True
-                    break
-            
-            if action[i] == 1 and is_phys_ready and not is_inhibited:
+            if masked_action[i] > 0.5 and action[i] == 1 and is_phys_ready:
                 triggered_ids.append(i)
                 self.consecutive_trigger_counts[i] += 1
                 self.last_fire_times[i] = self.core.sim_time
             else:
                 if action[i] == 0:
                     self.consecutive_trigger_counts[i] = 0
-        
-        # 手动调用模拟器的触发处理
-        self.core._process_sensor_trigger(triggered_ids)
         
         # 2. 机器人移动 (同步 Benchmark 中的智能避障 Lissajous 曲线)
         speed = 1.5
@@ -311,50 +323,52 @@ class SonarTriggerEnv(gym.Env):
         if final_pos is not None:
             self.core.robot_pos = final_pos
             self.core.robot_angle = math.degrees(self.current_angle_rad) % 360
+        self.sector_helper.advance()
             
-        # 3. 物理步进
+        # 3. 物理步进 (更新时间, 清空 active_sensors_this_frame)
         self.core.step()
         
-        # 4. 更新自定义概率地图
+        # 4. 执行传感器触发 (动作) - 必须在 core.step() 之后!
+        self.core._process_sensor_trigger(triggered_ids)
+        
+        # 5. 显式更新 Fisher 地图 (核心修复)
+        self.core.update_maps()
+
+        # 6. 更新自定义概率地图
         self._update_occupancy_map(list(self.core.active_sensors_this_frame))
         
         # 5. 更新陈旧度地图 (随时间增加，最大为 1.0)
         self.staleness_map = np.clip(self.staleness_map + 0.01, 0.0, 1.0)
         
-        # 6. 计算奖励 (简化版：高信息增益权重 + 严厉串扰惩罚)
+        # 6. 计算奖励
         
-        # A. 信息获取奖励 (Information Gain)
-        # 使用熵减作为衡量标准：|p - 0.5| 的增量
-        # 提高权重以鼓励有效探索
-        current_entropy_reduction = np.sum(np.abs(self.occupancy_map - 0.5))
-        entropy_gain = current_entropy_reduction - self.prev_soft_coverage
-        self.prev_soft_coverage = current_entropy_reduction
+        # A. 覆盖率奖励 (Coverage Gain) - 与 Benchmark 逻辑对齐
+        # 统计 Fisher 信息图中值 > 0.1 的像素点数量增量
+        current_fisher_coverage = np.count_nonzero(self.core.global_feature_map > 0.1)
+        coverage_gain = current_fisher_coverage - self.prev_fisher_coverage
+        self.prev_fisher_coverage = current_fisher_coverage
         
         # B. 串扰惩罚 (Crosstalk Penalty)
-        # 保持高惩罚，杜绝数据污染
+        # 设置极高的串扰惩罚，强制 RL 学习避免串扰
         new_crosstalk = self.core.crosstalk_count - self.prev_crosstalk
         self.prev_crosstalk = self.core.crosstalk_count
-        crosstalk_penalty = new_crosstalk * 100.0  # 提升至 100.0
+        crosstalk_penalty = new_crosstalk * 1.0  # -500 每帧
         
         # C. 发射成本 (Firing Cost)
-        # 基础成本，用于筛选低价值发射
-        # 只有当 entropy_gain * 100 > 1.0 (即 gain > 0.01) 时，发射才是有利可图的
+        # 赋予传感器发射极小的负奖励
         num_fired = len(triggered_ids)
-        firing_cost = num_fired * 1.0
+        firing_cost = num_fired * 0.5   # -0.5 每个传感器
         
-        # 总奖励公式
-        # 简化为：信息增益 - 串扰 - 发射成本
-        reward = (entropy_gain * 1000.0) - crosstalk_penalty - firing_cost
-        
-        # 记录确信单元格数量用于指标统计 (不直接参与奖励)
-        confident_mask = (self.occupancy_map < 0.3) | (self.occupancy_map > 0.7)
-        current_confident_cells = np.count_nonzero(confident_mask)
+        # 奖励组合：
+        # 每个新增的 Fisher 覆盖像素点奖励 10.0
+        reward = (coverage_gain * 10.0) - (crosstalk_penalty*0) - (firing_cost*0)
+        # reward = (coverage_gain * 10.0) - crosstalk_penalty - firing_cost
         
         self.current_step += 1
         terminated = self.current_step >= self.max_steps
         truncated = False
         
-        return self._get_obs(), reward, terminated, truncated, {"coverage": current_confident_cells}
+        return self._get_obs(), reward, terminated, truncated, {"coverage": current_fisher_coverage}
 
     def render(self):
         pass

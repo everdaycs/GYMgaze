@@ -186,10 +186,10 @@ class TriggerManager:
                 strategy = self._strategies[value]
                 if isinstance(strategy, RLStrategy) and strategy.model is None:
                     # 优先加载最终模型，如果不存在则尝试加载最新的 checkpoint
-                    model_path = "checkpoints/trigger_rl/ppo_sonar_final.zip"
+                    model_path = "checkpoints/trigger_rl/best_benchmark_model.zip"
                     if not os.path.exists(model_path):
                         # 尝试加载一个已知的 checkpoint
-                        model_path = "checkpoints/trigger_rl/ppo_sonar_10720000_steps.zip"
+                        model_path = "checkpoints/trigger_rl/ppo_sonar_final.zip"
                     
                     if os.path.exists(model_path):
                         strategy.load_model(model_path)
